@@ -58,6 +58,17 @@ export default function App() {
 
   // --- Effects ---
 
+  // Auto-save to LocalStorage per 30 seconds to prevent data loss
+  useEffect(() => {
+    if (!project) return;
+    const saveInterval = setInterval(() => {
+      localStorage.setItem('autosave_project', JSON.stringify(project));
+      console.log('Autosaved project to browser storage');
+    }, 30000);
+    return () => clearInterval(saveInterval);
+  }, [project]);
+
+
   useEffect(() => {
     applyTheme(appSettings.theme);
 
