@@ -22,11 +22,9 @@ service cloud.firestore {
         request.auth.token.email in resource.data.memberEmails ||
         // Case 2: Joining via Invitation
         (
-          // Ensure only adding themselves/updating member list
-          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberEmails', 'lastInviteAccepted']) &&
           // Verify the invitation token
           get(/databases/$(database)/documents/invitations/$(request.resource.data.lastInviteAccepted)).data.projectId == projectId &&
-          get(/databases/$(database)/documents/invitations/$(request.resource.data.lastInviteAccepted)).data.invitedEmail == request.auth.token.email &&
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.lastInviteAccepted)).data.invitedEmail.lower() == request.auth.token.email.lower() &&
           get(/databases/$(database)/documents/invitations/$(request.resource.data.lastInviteAccepted)).data.status == 'accepted'
         )
       );
