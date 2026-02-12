@@ -23,7 +23,7 @@ import {
 } from './services/firestoreService';
 import { parseTranscriptFile } from './utils/transcriptParser';
 import { exportProjectData, parseCodebookFile, mergeCodesInProject, saveProjectFile, printTranscript, exportCodebook, generateId } from './utils/dataUtils';
-import { removeHighlightsForCode, stripHighlights } from './utils/highlightUtils';
+import { removeHighlightsForCode, stripHighlights, restoreHighlights } from './utils/highlightUtils';
 import { generateChildColor, generateColor } from './utils/colorUtils';
 import { applyTheme } from './utils/themeUtils';
 import { Eye, Save, LogOut, Trash2, Edit2, FileText, MoreHorizontal, Upload, Plus, StickyNote, Printer, Download, Cloud, Users, Wifi, WifiOff } from 'lucide-react';
@@ -303,7 +303,8 @@ export default function App() {
       const localTranscripts: Transcript[] = transcripts.map(t => ({
         id: t.id,
         name: t.name,
-        content: t.content,
+        // Highlights are user-local, we must re-apply them from selection metadata
+        content: restoreHighlights(t.content, userData.selections.filter(s => s.transcriptId === t.id), codes),
         dateAdded: t.dateAdded,
         memo: userData.transcriptMemos[t.id] || '',
       }));
