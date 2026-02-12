@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QualiLab Distributed</title>
+    
+    <!-- 
+      NOTE: We are keeping the Tailwind CDN for now so your styles work. 
+      For a 100% offline app in the future, we would install Tailwind locally.
+    -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdn.jsdelivr.net/npm/remixicon@3.5.0/fonts/remixicon.css" rel="stylesheet">
+    
+    <style>
+      /* Global Styles & Scrollbars */
+      @font-face {
+        font-family: 'OpenDyslexic';
+        src: url('https://cdn.jsdelivr.net/npm/opendyslexic@2.1.0-beta1/maven/OpenDyslexic-Regular.woff') format('woff');
+        font-weight: normal;
+        font-style: normal;
+      }
+      .font-dyslexic {
+        font-family: 'OpenDyslexic', sans-serif !important;
+      }
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #f1f1f1; 
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #cbd5e1; 
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #94a3b8; 
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: #f8fafc; /* slate-50 */
+      }
+    </style>
+  <script type="module" crossorigin src="/QualCode-Vibed/assets/index-CG5una9z.js"></script>
+</head>
+  <body>
+    <div id="root" class="h-full w-full"></div>
+    <!-- 
+      IMPORTANT: The path must be relative (./) or direct to the file 
+      so Electron can find it on your hard drive. 
+    -->
+  </body>
+</html>
