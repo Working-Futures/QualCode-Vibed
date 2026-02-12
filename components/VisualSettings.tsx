@@ -18,12 +18,12 @@ export const VisualSettings: React.FC<Props> = ({ settings, onUpdate }) => {
         {/* Theme Selector */}
         <div className="space-y-2">
           <label className="text-xs font-bold text-[var(--text-muted)] uppercase flex items-center gap-2">
-            <Palette size={12}/> Vibe Theme
+            <Palette size={12} /> Vibe Theme
           </label>
-          <select 
+          <select
             className="w-full p-2 border rounded text-sm bg-[var(--bg-main)] text-[var(--text-main)]"
             value={settings.theme}
-            onChange={(e) => onUpdate({...settings, theme: e.target.value as AppTheme})}
+            onChange={(e) => onUpdate({ ...settings, theme: e.target.value as AppTheme })}
           >
             <option value="default">QualCode Standard</option>
             <option value="hobbit">Hobbit Study (Earth)</option>
@@ -33,17 +33,17 @@ export const VisualSettings: React.FC<Props> = ({ settings, onUpdate }) => {
           </select>
         </div>
 
-        <hr className="border-[var(--border)]"/>
+        <hr className="border-[var(--border)]" />
 
         {/* Font Family */}
         <div className="space-y-2">
           <label className="text-xs font-bold text-[var(--text-muted)] uppercase flex items-center gap-2">
-            <Type size={12}/> Typography
+            <Type size={12} /> Typography
           </label>
-          <select 
+          <select
             className="w-full p-2 border rounded text-sm bg-[var(--bg-main)] text-[var(--text-main)]"
             value={settings.fontFamily}
-            onChange={(e) => onUpdate({...settings, fontFamily: e.target.value as any})}
+            onChange={(e) => onUpdate({ ...settings, fontFamily: e.target.value as any })}
           >
             <option value="sans">Clean Sans (Inter)</option>
             <option value="serif">Academic Serif (Merriweather)</option>
@@ -59,56 +59,49 @@ export const VisualSettings: React.FC<Props> = ({ settings, onUpdate }) => {
         <div className="grid grid-cols-2 gap-2">
           <div>
             <label className="text-xs text-[var(--text-muted)]">Text Size</label>
-            <input 
+            <input
               type="range" min="12" max="32" step="1"
               className="w-full"
               value={settings.fontSize}
-              onChange={(e) => onUpdate({...settings, fontSize: parseInt(e.target.value)})}
+              onChange={(e) => onUpdate({ ...settings, fontSize: parseInt(e.target.value) })}
             />
           </div>
           <div>
             <label className="text-xs text-[var(--text-muted)]">Spacing</label>
-            <input 
+            <input
               type="range" min="0" max="2" step="0.1"
               className="w-full"
               value={settings.charSpacing}
-              onChange={(e) => onUpdate({...settings, charSpacing: parseFloat(e.target.value)})}
+              onChange={(e) => onUpdate({ ...settings, charSpacing: parseFloat(e.target.value) })}
             />
           </div>
         </div>
 
         {/* Sidebar Width */}
         <div className="space-y-2">
-            <label className="text-xs font-bold text-[var(--text-muted)] uppercase flex items-center gap-2">
-                <Layout size={12}/> Sidebar Width
-            </label>
-            <input 
-              type="range" min="200" max="500" step="10"
-              className="w-full"
-              // Assuming you add sidebarWidth to AppSettings or manage it locally in App.tsx
-              // For now, let's assume we pass a prop or update a CSS variable. 
-              // Simplest is to update AppSettings. 
-              // Note: You need to add sidebarWidth to AppSettings interface in types.ts first.
-              // I will use a custom event or logic if types aren't updated, 
-              // but ideally update types.
-              // For this response, I'll mock the handler assuming types are updated.
-              value={(settings as any).sidebarWidth || 288}
-              onChange={(e) => onUpdate({...settings, sidebarWidth: parseInt(e.target.value)} as any)}
-            />
+          <label className="text-xs font-bold text-[var(--text-muted)] uppercase flex items-center gap-2">
+            <Layout size={12} /> Sidebar Width
+          </label>
+          <input
+            type="range" min="200" max="500" step="10"
+            className="w-full"
+            value={settings.sidebarWidth || 288}
+            onChange={(e) => onUpdate({ ...settings, sidebarWidth: parseInt(e.target.value) })}
+          />
         </div>
 
         <div className="border-t border-[var(--border)] pt-3 space-y-3">
-            <label className="flex items-center justify-between cursor-pointer group">
-                <span className="text-sm font-medium text-[var(--text-main)] flex items-center gap-2">
-                    <AlignJustify size={14}/> Zebra Striping
-                </span>
-                <input 
-                    type="checkbox" 
-                    className="toggle checkbox-primary"
-                    checked={settings.zebraStriping}
-                    onChange={(e) => onUpdate({...settings, zebraStriping: e.target.checked})}
-                />
-            </label>
+          <label className="flex items-center justify-between cursor-pointer group">
+            <span className="text-sm font-medium text-[var(--text-main)] flex items-center gap-2">
+              <AlignJustify size={14} /> Zebra Striping
+            </span>
+            <input
+              type="checkbox"
+              className="toggle checkbox-primary"
+              checked={settings.zebraStriping}
+              onChange={(e) => onUpdate({ ...settings, zebraStriping: e.target.checked })}
+            />
+          </label>
         </div>
       </div>
     </div>

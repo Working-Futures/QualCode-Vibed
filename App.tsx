@@ -1,6 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import * as mammoth from 'mammoth';
-import { Project, Code, Selection, Transcript, AppSettings } from './types';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Project, Code, Selection, Transcript, AppSettings, CloudProject, UserProjectData } from './types';
 import { Editor } from './components/Editor';
 import { CodeTree } from './components/CodeTree';
 import { AnalysisView } from './components/AnalysisView';
@@ -8,11 +7,26 @@ import { Codebook } from './components/Codebook';
 import { VisualSettings } from './components/VisualSettings';
 import { ProjectLauncher } from './components/ProjectLauncher';
 import { MemoSidebar } from './components/MemoSidebar';
+import { CollaborationPanel } from './components/CollaborationPanel';
+import { useAuth } from './contexts/AuthContext';
+import {
+  getCloudProject,
+  getTranscripts,
+  getCodes,
+  getUserProjectData,
+  saveTranscript,
+  saveCodes,
+  saveUserProjectData,
+  updateCloudProject,
+  deleteTranscript as deleteCloudTranscript,
+  updateTranscript as updateCloudTranscript,
+} from './services/firestoreService';
+import { parseTranscriptFile } from './utils/transcriptParser';
 import { exportProjectData, parseCodebookFile, mergeCodesInProject, saveProjectFile, printTranscript, exportCodebook, generateId } from './utils/dataUtils';
-import { removeHighlightsForCode } from './utils/highlightUtils';
+import { removeHighlightsForCode, stripHighlights } from './utils/highlightUtils';
 import { generateChildColor, generateColor } from './utils/colorUtils';
 import { applyTheme } from './utils/themeUtils';
-import { Eye, Save, LogOut, Trash2, Edit2, FileText, MoreHorizontal, Upload, Plus, StickyNote, Printer, Download } from 'lucide-react';
+import { Eye, Save, LogOut, Trash2, Edit2, FileText, MoreHorizontal, Upload, Plus, StickyNote, Printer, Download, Cloud, Users, Wifi, WifiOff } from 'lucide-react';
 
 const initialProject: Project = {
   id: 'default-project',
@@ -38,17 +52,31 @@ const defaultSettings: AppSettings = {
 };
 
 export default function App() {
+  const { user } = useAuth();
+
   const [project, setProject] = useState<Project | null>(null);
   const [activeView, setActiveView] = useState<'editor' | 'analysis' | 'codebook'>('editor');
   const [activeTranscriptId, setActiveTranscriptId] = useState<string | null>(null);
+  const [history, setHistory] = useState<Project[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+
   const [activeCodeId, setActiveCodeId] = useState<string | null>(null);
 
   const [showVisualSettings, setShowVisualSettings] = useState(false);
-  const [showMemoSidebar, setShowMemoSidebar] = useState(true); // Default Open
+  const [showMemoSidebar, setShowMemoSidebar] = useState(true);
+  const [showCollabPanel, setShowCollabPanel] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultSettings);
   const [sidebarWidth, setSidebarWidth] = useState(288);
 
   const [transcriptMenu, setTranscriptMenu] = useState<{ id: string, x: number, y: number } | null>(null);
+
+  // Cloud State
+  const [cloudProject, setCloudProject] = useState<CloudProject | null>(null);
+  const [cloudSaving, setCloudSaving] = useState(false);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  // Debounce timer for cloud saves
+  const cloudSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Search States
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
@@ -68,7 +96,57 @@ export default function App() {
     return () => clearInterval(saveInterval);
   }, [project]);
 
+  // Warn user before closing the tab with unsaved work
+  useEffect(() => {
+    if (!project) return;
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      // Do a final local autosave
+      localStorage.setItem('autosave_project', JSON.stringify(project));
+      // Browser will show a generic "are you sure?" dialog
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [project]);
 
+  const undo = useCallback(() => {
+    if (historyIndex > 0) {
+      const newIndex = historyIndex - 1;
+      setHistoryIndex(newIndex);
+      setProject(history[newIndex]);
+    }
+  }, [history, historyIndex]);
+
+  const redo = useCallback(() => {
+    if (historyIndex < history.length - 1) {
+      const newIndex = historyIndex + 1;
+      setHistoryIndex(newIndex);
+      setProject(history[newIndex]);
+    }
+  }, [history, historyIndex]);
+
+  // Undo / Redo Shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          redo();
+        } else {
+          e.preventDefault();
+          undo();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [undo, redo]);
+
+  // Apply theme & font
   useEffect(() => {
     applyTheme(appSettings.theme);
 
@@ -92,8 +170,8 @@ export default function App() {
 
   // Handle Sidebar Width Dynamic Update
   useEffect(() => {
-    if ((appSettings as any).sidebarWidth) {
-      setSidebarWidth((appSettings as any).sidebarWidth);
+    if (appSettings.sidebarWidth) {
+      setSidebarWidth(appSettings.sidebarWidth);
     }
   }, [appSettings]);
 
@@ -109,7 +187,6 @@ export default function App() {
       const query = globalSearchQuery.toLowerCase();
 
       project?.transcripts.forEach(t => {
-        // Parse HTML content to text lines for searching
         const parser = new DOMParser();
         const doc = parser.parseFromString(t.content, 'text/html');
         const lines = doc.querySelectorAll('.transcript-line');
@@ -119,7 +196,7 @@ export default function App() {
           if (text.toLowerCase().includes(query)) {
             results.push({
               transcriptId: t.id,
-              lineIndex: idx + 1, // 1-based
+              lineIndex: idx + 1,
               text: text.substring(0, 100) + (text.length > 100 ? '...' : '')
             });
           }
@@ -131,12 +208,115 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [globalSearchQuery, project]);
 
+  // ─── Cloud Auto-Save (Debounced) ───
+  const saveToCloud = useCallback(async (
+    currentProject: Project,
+    currentCloudProject: CloudProject | null,
+    currentUser: typeof user
+  ) => {
+    if (!currentCloudProject || !currentUser) return;
 
+    setCloudSyncStatus('saving');
+    try {
+      // Save codes (shared codebook)
+      await saveCodes(currentCloudProject.id, currentProject.codes);
+
+      // Save user-specific data (selections + memos)
+      const transcriptMemos: Record<string, string> = {};
+      currentProject.transcripts.forEach(t => {
+        if (t.memo) transcriptMemos[t.id] = t.memo;
+      });
+
+      await saveUserProjectData(currentCloudProject.id, currentUser.uid, {
+        selections: currentProject.selections,
+        transcriptMemos,
+        personalMemo: currentProject.projectMemo || '',
+      });
+
+      // Update project metadata
+      await updateCloudProject(currentCloudProject.id, {
+        lastModified: Date.now(),
+        projectMemo: currentProject.projectMemo || '',
+      });
+
+      setCloudSyncStatus('saved');
+      setTimeout(() => setCloudSyncStatus('idle'), 2000);
+    } catch (err) {
+      console.error('Cloud save error:', err);
+      setCloudSyncStatus('error');
+      setTimeout(() => setCloudSyncStatus('idle'), 5000);
+    }
+  }, []);
+
+  const debouncedCloudSave = useCallback((updatedProject: Project) => {
+    if (!cloudProject || !user) return;
+
+    if (cloudSaveTimer.current) {
+      clearTimeout(cloudSaveTimer.current);
+    }
+
+    cloudSaveTimer.current = setTimeout(() => {
+      saveToCloud(updatedProject, cloudProject, user);
+    }, 3000); // 3 second debounce
+  }, [cloudProject, user, saveToCloud]);
+
+  // ─── Open Cloud Project ───
+  const openCloudProject = async (cp: CloudProject) => {
+    if (!user) return;
+
+    try {
+      // Load all cloud data
+      const [transcripts, codes, userData] = await Promise.all([
+        getTranscripts(cp.id),
+        getCodes(cp.id),
+        getUserProjectData(cp.id, user.uid),
+      ]);
+
+      // Convert cloud transcripts to local format
+      const localTranscripts: Transcript[] = transcripts.map(t => ({
+        id: t.id,
+        name: t.name,
+        content: t.content,
+        dateAdded: t.dateAdded,
+        memo: userData.transcriptMemos[t.id] || '',
+      }));
+
+      // Construct a local Project from cloud data
+      const localProject: Project = {
+        id: cp.id,
+        name: cp.name,
+        created: cp.created,
+        lastModified: cp.lastModified,
+        codes,
+        transcripts: localTranscripts,
+        selections: userData.selections,
+        projectMemo: userData.personalMemo || cp.projectMemo || '',
+        isCloud: true,
+        cloudProjectId: cp.id,
+      };
+
+      setCloudProject(cp);
+      setProject(localProject);
+      setActiveTranscriptId(localTranscripts.length > 0 ? localTranscripts[0].id : null);
+    } catch (err) {
+      console.error('Error opening cloud project:', err);
+      alert("Error opening cloud project. Please try again.");
+    }
+  };
+
+  // ─── Landing Page ───
   if (!project) {
     return (
       <ProjectLauncher
-        onOpenProject={(p) => setProject(p)}
-        onCreateProject={() => setProject(initialProject)}
+        onOpenProject={(p) => {
+          setCloudProject(null);
+          setProject(p);
+        }}
+        onCreateProject={() => {
+          setCloudProject(null);
+          setProject(initialProject);
+        }}
+        onOpenCloudProject={openCloudProject}
       />
     );
   }
@@ -147,8 +327,24 @@ export default function App() {
   // --- Actions ---
 
   const handleProjectUpdate = (updatedProject: Project) => {
-    setProject({ ...updatedProject, lastModified: Date.now() });
+    const p = { ...updatedProject, lastModified: Date.now() };
+
+    // Add to history
+    const newHistory = history.slice(0, historyIndex + 1);
+    newHistory.push(p);
+    if (newHistory.length > 30) newHistory.shift(); // Keep last 30 states
+    setHistory(newHistory);
+    setHistoryIndex(newHistory.length - 1);
+
+    setProject(p);
+
+    // If cloud project, debounce save to cloud
+    if (cloudProject && user) {
+      debouncedCloudSave(p);
+    }
   };
+
+
 
   const handleImportCodes = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -167,38 +363,43 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      let rawText = '';
-      if (file.name.endsWith('.docx')) {
-        const arrayBuffer = await file.arrayBuffer();
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        rawText = result.value;
-      } else {
-        rawText = await file.text();
-      }
-      // Chunking Logic for Line Numbers
-      const lines = rawText.split(/\r?\n/).filter(line => line.trim().length > 0);
-      const formattedHtml = lines.map((line, index) =>
-        `<div class="transcript-line" data-line="${index + 1}">${line}</div>`
-      ).join('');
+      const { name, content } = await parseTranscriptFile(file);
 
       const newTranscript: Transcript = {
         id: crypto.randomUUID(),
-        name: file.name,
-        content: formattedHtml,
+        name,
+        content,
         dateAdded: Date.now(),
         memo: ''
       };
+
+      // If cloud project, save clean (no highlights) content to cloud
+      if (cloudProject && user) {
+        await saveTranscript(cloudProject.id, {
+          id: newTranscript.id,
+          name: newTranscript.name,
+          content: stripHighlights(newTranscript.content),
+          dateAdded: newTranscript.dateAdded,
+          uploadedBy: user.uid,
+        });
+      }
+
       handleProjectUpdate({ ...project, transcripts: [...project.transcripts, newTranscript] });
       setActiveTranscriptId(newTranscript.id);
       e.target.value = '';
     } catch (err) {
       console.error(err);
-      alert("Error importing file.");
+      alert("Error importing file. Please check the file format.");
     }
   };
 
-  const deleteTranscript = (id: string) => {
+  const deleteTranscriptHandler = (id: string) => {
     if (confirm("Delete this transcript and all its highlights?")) {
+      // If cloud, delete from cloud too
+      if (cloudProject) {
+        deleteCloudTranscript(cloudProject.id, id).catch(console.error);
+      }
+
       handleProjectUpdate({
         ...project,
         transcripts: project.transcripts.filter(t => t.id !== id),
@@ -213,6 +414,11 @@ export default function App() {
     if (!t) return;
     const newName = prompt("Rename transcript:", t.name);
     if (newName && newName.trim()) {
+      // If cloud, update cloud too
+      if (cloudProject) {
+        updateCloudTranscript(cloudProject.id, id, { name: newName }).catch(console.error);
+      }
+
       handleProjectUpdate({
         ...project,
         transcripts: project.transcripts.map(tx => tx.id === id ? { ...tx, name: newName } : tx)
@@ -226,6 +432,9 @@ export default function App() {
       selections: [...project.selections, newSelection],
       transcripts: project.transcripts.map(t => t.id === newSelection.transcriptId ? { ...t, content: updatedHtml } : t)
     });
+
+    // Note: we do NOT save highlighted HTML to cloud — highlights are user-local.
+    // The cloud transcript stores clean content. Selections are saved via userdata.
   };
 
   const handleSelectionDelete = (selectionId: string, updatedHtml: string) => {
@@ -235,19 +444,20 @@ export default function App() {
       selections: project.selections.filter(s => s.id !== selectionId),
       transcripts: project.transcripts.map(t => t.id === activeTranscriptId ? { ...t, content: updatedHtml } : t)
     });
+
+    // Note: we do NOT save highlighted HTML to cloud — highlights are user-local.
+    // Selections are saved via userdata.
   };
 
   const createCode = (e?: React.MouseEvent) => {
-    if (e) e.stopPropagation(); // Prevent container click from deselecting immediately
+    if (e) e.stopPropagation();
     const parent = activeCodeId ? project.codes.find(c => c.id === activeCodeId) : null;
     let newColor = '#cccccc';
 
     if (parent) {
-      // Child Code
       const siblings = project.codes.filter(c => c.parentId === parent.id).length;
       newColor = generateChildColor(parent.color, siblings);
     } else {
-      // Root Code
       const roots = project.codes.filter(c => !c.parentId).length;
       newColor = generateColor(roots);
     }
@@ -261,6 +471,30 @@ export default function App() {
 
     handleProjectUpdate({ ...project, codes: [...project.codes, newCode] });
     setActiveCodeId(newCode.id);
+  };
+
+  const handleCloseProject = () => {
+    if (confirm("Close project? Unsaved changes will be lost.")) {
+      // Final cloud save before closing
+      if (cloudProject && user && project) {
+        saveToCloud(project, cloudProject, user);
+      }
+      setProject(null);
+      setCloudProject(null);
+      setShowCollabPanel(false);
+    }
+  };
+
+  const handleSaveProject = async () => {
+    if (!project) return;
+
+    // Always save local file
+    saveProjectFile(project);
+
+    // If cloud, also do an immediate cloud save
+    if (cloudProject && user) {
+      await saveToCloud(project, cloudProject, user);
+    }
   };
 
   return (
@@ -323,7 +557,6 @@ export default function App() {
                             setActiveTranscriptId(res.transcriptId);
                             setActiveView('editor');
                             setShowSearchResults(false);
-                            // TODO: Scroll to line
                           }}
                         >
                           <div className="text-xs font-bold text-[var(--accent)] mb-1">{t?.name} (Line {res.lineIndex})</div>
@@ -338,7 +571,37 @@ export default function App() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          {/* Cloud Sync Status */}
+          {cloudProject && (
+            <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all ${cloudSyncStatus === 'saving' ? 'bg-blue-500/20 text-blue-300' :
+              cloudSyncStatus === 'saved' ? 'bg-green-500/20 text-green-300' :
+                cloudSyncStatus === 'error' ? 'bg-red-500/20 text-red-300' :
+                  'bg-white/10 text-slate-400'
+              }`}>
+              {cloudSyncStatus === 'saving' ? (
+                <><Cloud size={12} className="animate-pulse" /> Syncing...</>
+              ) : cloudSyncStatus === 'saved' ? (
+                <><Cloud size={12} /> Saved</>
+              ) : cloudSyncStatus === 'error' ? (
+                <><WifiOff size={12} /> Sync Error</>
+              ) : (
+                <><Wifi size={12} /> Cloud</>
+              )}
+            </div>
+          )}
+
+          {/* Collaboration Button (Cloud only) */}
+          {cloudProject && (
+            <button
+              onClick={() => setShowCollabPanel(!showCollabPanel)}
+              className={`p-2 rounded transition-colors ${showCollabPanel ? 'bg-purple-500/30 text-purple-300' : 'text-slate-300 hover:bg-white/10'}`}
+              title="Collaboration"
+            >
+              <Users size={18} />
+            </button>
+          )}
+
           <button
             onClick={() => setShowVisualSettings(!showVisualSettings)}
             className={`p-2 rounded hover:bg-white/10 transition-colors ${showVisualSettings ? 'bg-white/20 text-[var(--accent)]' : 'text-slate-300'}`}
@@ -350,14 +613,14 @@ export default function App() {
           <div className="h-6 w-px bg-white/20 mx-1"></div>
 
           <button
-            onClick={() => saveProjectFile(project)}
+            onClick={handleSaveProject}
             className="px-3 py-1.5 bg-[var(--accent)] hover:brightness-110 rounded text-xs font-bold text-[var(--accent-text)] shadow-sm transition-all flex items-center gap-2"
           >
             <Save size={14} /> Save
           </button>
 
           <button
-            onClick={() => { if (confirm("Close project? Unsaved changes will be lost.")) setProject(null); }}
+            onClick={handleCloseProject}
             className="p-2 text-slate-400 hover:text-red-400 hover:bg-white/10 rounded transition-colors"
             title="Close Project"
           >
@@ -384,7 +647,7 @@ export default function App() {
                 <h3 className="font-bold text-xs uppercase text-[var(--text-muted)] tracking-wider">Documents</h3>
                 <label className="cursor-pointer hover:bg-[var(--bg-main)] p-1 rounded text-[var(--accent)] transition-colors" title="Import Document">
                   <Plus size={16} />
-                  <input type="file" className="hidden" accept=".txt,.docx" onChange={handleTranscriptUpload} />
+                  <input type="file" className="hidden" accept=".txt,.docx,.pdf" onChange={handleTranscriptUpload} />
                 </label>
               </div>
               <div className="overflow-y-auto px-2 pb-2 space-y-1">
@@ -445,14 +708,14 @@ export default function App() {
               <div className="px-3 pb-2">
                 <label className="flex items-center justify-center w-full py-1.5 border border-dashed border-[var(--border)] rounded text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] hover:bg-[var(--bg-main)] cursor-pointer transition-colors">
                   <Upload size={12} className="mr-2" /> Import Codebook
-                  <input type="file" className="hidden" accept=".csv,.xlsx" onChange={handleImportCodes} />
+                  <input type="file" className="hidden" accept=".csv,.tsv,.xlsx,.xls" onChange={handleImportCodes} />
                 </label>
               </div>
 
               {/* Code List with Click-to-Deselect Background */}
               <div
                 className="flex-1 overflow-y-auto px-2"
-                onClick={() => setActiveCodeId(null)} // Click empty space to deselect
+                onClick={() => setActiveCodeId(null)}
               >
                 <CodeTree
                   codes={project.codes}
@@ -503,8 +766,29 @@ export default function App() {
                     activeCode={activeCode}
                     onSelectionCreate={handleSelectionCreate}
                     onSelectionDelete={handleSelectionDelete}
+                    onSaveProject={handleSaveProject}
+                    onCreateInVivoCode={(text, transcriptId) => {
+                      // In-vivo coding: create a new code named after the selected text
+                      const newCode: Code = {
+                        id: generateId(),
+                        name: text.substring(0, 50),
+                        color: generateColor(project.codes.filter(c => !c.parentId).length),
+                        description: `In-vivo code created from: "${text}"`
+                      };
+                      handleProjectUpdate({ ...project, codes: [...project.codes, newCode] });
+                      setActiveCodeId(newCode.id);
+                    }}
+                    onAnnotateSelection={(selId, annotation) => {
+                      handleProjectUpdate({
+                        ...project,
+                        selections: project.selections.map(s =>
+                          s.id === selId ? { ...s, annotation } : s
+                        )
+                      });
+                    }}
                     settings={appSettings}
                     codes={project.codes}
+                    selections={project.selections}
                   />
                 </div>
               </div>
@@ -541,6 +825,17 @@ export default function App() {
 
       </div>
 
+      {/* Collaboration Panel (Cloud projects only) */}
+      {showCollabPanel && cloudProject && user && (
+        <CollaborationPanel
+          cloudProject={cloudProject}
+          currentUserId={user.uid}
+          codes={project.codes}
+          transcripts={project.transcripts}
+          onClose={() => setShowCollabPanel(false)}
+        />
+      )}
+
       {/* Floating Transcript Menu */}
       {transcriptMenu && (
         <>
@@ -556,7 +851,7 @@ export default function App() {
               <Edit2 size={12} /> Rename
             </button>
             <button
-              onClick={() => { deleteTranscript(transcriptMenu.id); setTranscriptMenu(null); }}
+              onClick={() => { deleteTranscriptHandler(transcriptMenu.id); setTranscriptMenu(null); }}
               className="px-3 py-2 hover:bg-red-50 text-red-600 text-left flex items-center gap-2 text-sm"
             >
               <Trash2 size={12} /> Delete

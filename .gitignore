@@ -111,6 +111,7 @@ dist
 
 # mac files
 .DS_Store
+*.DS_Store
 
 # Editor directories and files
 .idea
@@ -125,3 +126,16 @@ Thumbs.db
 # production
 /dist
 /release
+
+# Firebase
+.firebase/
+firebase-debug.log
+firestore-debug.log
+
+# Environment files (in case you add them later)
+.env.production
+.env.development
+.env.staging
+
+# Gemini agent artifacts (not project code)
+.gemini/

@@ -10,7 +10,7 @@ interface Props {
 }
 
 export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) => {
-    const [viewMode, setViewMode] = useState<'chart' | 'table' | 'segments'>('chart');
+    const [viewMode, setViewMode] = useState<'chart' | 'table' | 'segments' | 'cooccurrence'>('chart');
     const [selectedFamilyIds, setSelectedFamilyIds] = useState<string[]>([]);
 
     const { chartData, filteredCodes, allSelections } = useMemo(() => {
@@ -54,6 +54,47 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
         );
     };
 
+    // Co-occurrence matrix data
+    const cooccurrenceMatrix = useMemo(() => {
+        const usedCodes = project.codes.filter(c => project.selections.some(s => s.codeId === c.id));
+        const matrix: Record<string, Record<string, number>> = {};
+
+        usedCodes.forEach(a => {
+            matrix[a.id] = {};
+            usedCodes.forEach(b => {
+                matrix[a.id][b.id] = 0;
+            });
+        });
+
+        // Group selections by transcript
+        const byTranscript: Record<string, typeof project.selections> = {};
+        project.selections.forEach(s => {
+            if (!byTranscript[s.transcriptId]) byTranscript[s.transcriptId] = [];
+            byTranscript[s.transcriptId].push(s);
+        });
+
+        // For each transcript, check overlapping/near selections
+        Object.values(byTranscript).forEach(sels => {
+            for (let i = 0; i < sels.length; i++) {
+                for (let j = i + 1; j < sels.length; j++) {
+                    const a = sels[i];
+                    const b = sels[j];
+                    if (a.codeId === b.codeId) continue;
+                    // Co-occurrence: same paragraph proximity (within 200 chars)
+                    const overlap = Math.abs(a.startIndex - b.startIndex) < 200;
+                    if (overlap) {
+                        matrix[a.codeId] = matrix[a.codeId] || {};
+                        matrix[b.codeId] = matrix[b.codeId] || {};
+                        matrix[a.codeId][b.codeId] = (matrix[a.codeId]?.[b.codeId] || 0) + 1;
+                        matrix[b.codeId][a.codeId] = (matrix[b.codeId]?.[a.codeId] || 0) + 1;
+                    }
+                }
+            }
+        });
+
+        return { matrix, codes: usedCodes };
+    }, [project.codes, project.selections]);
+
     return (
         <div className="absolute inset-0 z-20 bg-[var(--bg-main)]/90 flex items-center justify-center p-6 backdrop-blur-sm animate-in fade-in duration-200">
             <div className="bg-[var(--bg-panel)] rounded-2xl shadow-2xl w-full max-w-6xl h-full max-h-[90vh] flex flex-col overflow-hidden border border-[var(--border)]">
@@ -83,6 +124,12 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
                                 className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${viewMode === 'segments' ? 'bg-[var(--bg-panel)] shadow text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
                             >
                                 Segments
+                            </button>
+                            <button
+                                onClick={() => setViewMode('cooccurrence')}
+                                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${viewMode === 'cooccurrence' ? 'bg-[var(--bg-panel)] shadow text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
+                            >
+                                Co-occurrence
                             </button>
                         </div>
                         <button
@@ -223,6 +270,64 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
                                         })}
                                     </tbody>
                                 </table>
+                            </div>
+                        )}
+
+                        {viewMode === 'cooccurrence' && (
+                            <div className="flex-1 overflow-auto border border-[var(--border)] rounded-lg">
+                                {cooccurrenceMatrix.codes.length === 0 ? (
+                                    <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
+                                        <p>No coded segments yet. Apply codes to transcripts to see co-occurrence patterns.</p>
+                                    </div>
+                                ) : (
+                                    <table className="w-full border-collapse text-sm">
+                                        <thead className="bg-[var(--bg-main)] sticky top-0 z-10">
+                                            <tr>
+                                                <th className="p-3 border-b border-r border-[var(--border)] min-w-[160px] bg-[var(--bg-main)] text-left text-[var(--text-muted)] text-xs font-bold uppercase">
+                                                    Co-occurrence
+                                                </th>
+                                                {cooccurrenceMatrix.codes.map(code => (
+                                                    <th key={code.id} className="p-2 border-b border-[var(--border)] bg-[var(--bg-main)] min-w-[80px]">
+                                                        <div className="flex items-center gap-1 justify-center">
+                                                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: code.color }} />
+                                                            <span className="text-xs truncate max-w-[70px]" title={code.name}>{code.name}</span>
+                                                        </div>
+                                                    </th>
+                                                ))}
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {cooccurrenceMatrix.codes.map(rowCode => (
+                                                <tr key={rowCode.id} className="border-b border-[var(--border)]">
+                                                    <td className="p-3 border-r border-[var(--border)] font-medium text-[var(--text-main)] bg-[var(--bg-panel)] sticky left-0">
+                                                        <div className="flex items-center gap-2">
+                                                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: rowCode.color }} />
+                                                            {rowCode.name}
+                                                        </div>
+                                                    </td>
+                                                    {cooccurrenceMatrix.codes.map(colCode => {
+                                                        const count = cooccurrenceMatrix.matrix[rowCode.id]?.[colCode.id] || 0;
+                                                        const isDiagonal = rowCode.id === colCode.id;
+                                                        const maxCount = Math.max(1, ...Object.values(cooccurrenceMatrix.matrix).flatMap(r => Object.values(r)));
+                                                        const intensity = count / maxCount;
+                                                        return (
+                                                            <td
+                                                                key={colCode.id}
+                                                                className={`p-3 text-center border-r border-[var(--border)] transition-colors ${isDiagonal ? 'bg-[var(--bg-main)]' : ''}`}
+                                                                style={!isDiagonal && count > 0 ? {
+                                                                    backgroundColor: `rgba(99, 102, 241, ${0.1 + intensity * 0.5})`,
+                                                                    color: intensity > 0.5 ? 'white' : 'var(--text-main)'
+                                                                } : {}}
+                                                            >
+                                                                {isDiagonal ? '—' : count > 0 ? <strong>{count}</strong> : <span className="text-[var(--text-muted)]">0</span>}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
                             </div>
                         )}
                     </div>

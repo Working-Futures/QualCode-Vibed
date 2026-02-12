@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ─── Users: Only own profile ───
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // ─── Projects ───
+    match /projects/{projectId} {
+      // Any authenticated user can create a project
+      allow create: if request.auth != null;
+
+      // Only members can read
+      allow read: if request.auth != null &&
+        request.auth.token.email in resource.data.memberEmails;
+
+      // Members can update (admin for metadata, collab for limited fields)
+      allow update: if request.auth != null &&
+        request.auth.token.email in resource.data.memberEmails;
+
+      // Only owner can delete
+      allow delete: if request.auth != null &&
+        resource.data.ownerId == request.auth.uid;
+
+      // ─── Transcripts: Members can read/write ───
+      match /transcripts/{transcriptId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Codes: Members can read/write (shared codebook) ───
+      match /codes/{codeId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── User Data: Members can read all (collaboration), only owner writes ───
+      match /userdata/{userId} {
+        // All project members can read (needed for collaboration view)
+        allow read: if request.auth != null &&
+          request.auth.token.email in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+
+        // Only the data owner can write their own data
+        allow write: if request.auth != null &&
+          request.auth.uid == userId;
+      }
+    }
+
+    // ─── Invitations ───
+    match /invitations/{invitationId} {
+      // Any authenticated user can create an invitation
+      allow create: if request.auth != null;
+
+      // Invited user can read their invitations
+      allow read: if request.auth != null &&
+        request.auth.token.email == resource.data.invitedEmail;
+
+      // Invited user can update (accept/decline), creator can update
+      allow update: if request.auth != null &&
+        (request.auth.token.email == resource.data.invitedEmail ||
+         request.auth.uid == resource.data.invitedBy);
+
+      // Creator can delete
+      allow delete: if request.auth != null &&
+        request.auth.uid == resource.data.invitedBy;
+    }
+  }
+}

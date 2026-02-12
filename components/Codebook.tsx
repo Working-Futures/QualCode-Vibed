@@ -155,6 +155,23 @@ export const Codebook: React.FC<CodebookProps> = ({ codes, onUpdateCode, onDelet
               </div>
             </div>
 
+            {/* Code Memo */}
+            <div>
+              <label className="block text-xs font-bold uppercase tracking-wider text-[var(--text-muted)] mb-2">
+                Research Memo
+              </label>
+              <textarea
+                className="w-full p-3 border border-[var(--border)] rounded-lg text-sm bg-[var(--bg-paper)] text-[var(--text-main)] focus:ring-2 focus:ring-[var(--accent)]/20 focus:border-[var(--accent)] transition-all"
+                rows={5}
+                value={activeCode.memo || ''}
+                onChange={(e) => onUpdateCode(activeCode.id, { memo: e.target.value })}
+                placeholder="Analytical notes, reflexive thoughts, emerging patterns related to this code..."
+              />
+              <p className="text-[10px] text-[var(--text-muted)] mt-1">
+                Write reflexive notes about how this code is being applied and what patterns you're seeing.
+              </p>
+            </div>
+
             <div className="pt-6 border-t border-[var(--border)] flex justify-end">
               <button
                 onClick={() => {

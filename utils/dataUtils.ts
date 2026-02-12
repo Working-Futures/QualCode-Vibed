@@ -117,7 +117,7 @@ export const exportProjectData = (project: Project) => {
 
 // --- Export Codebook ---
 export const exportCodebook = (codes: Code[]) => {
-  const headers = ['Name', 'Description', 'Color', 'ParentID', 'InclusionCriteria', 'ExclusionCriteria'];
+  const headers = ['Name', 'Description', 'Color', 'ParentID', 'InclusionCriteria', 'ExclusionCriteria', 'Examples'];
   const rows = codes.map(c => [
     `"${c.name.replace(/"/g, '""')}"`,
     `"${(c.description || '').replace(/"/g, '""')}"`,
@@ -125,6 +125,7 @@ export const exportCodebook = (codes: Code[]) => {
     c.parentId || '',
     `"${(c.inclusionCriteria || '').replace(/"/g, '""')}"`,
     `"${(c.exclusionCriteria || '').replace(/"/g, '""')}"`,
+    `"${(c.examples || '').replace(/"/g, '""')}"`,
   ]);
 
   const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
@@ -145,6 +146,7 @@ export const parseCodebookFile = async (file: File): Promise<Code[]> => {
   if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
     return parseCodebookExcel(file);
   } else {
+    // Works for .csv and .tsv — delimiter auto-detection handles both
     const text = await file.text();
     return parseCodebookCSV(text);
   }
@@ -157,50 +159,237 @@ const parseCodebookExcel = async (file: File): Promise<Code[]> => {
   const worksheet = workbook.Sheets[firstSheetName];
   const jsonData = XLSX.utils.sheet_to_json(worksheet) as any[];
 
-  return jsonData.map(row => ({
-    id: generateId(),
-    name: (row['Name'] || row['Code'] || row['Label'] || 'Untitled Code').toString().trim(),
-    description: (row['Description'] || row['Definition'] || '').toString().trim(),
-    color: (row['Color'] || `#${Math.floor(Math.random() * 16777215).toString(16)}`).toString().trim(),
-    parentId: row['ParentID'] ? row['ParentID'].toString().trim() : undefined
-  }));
+  // Build a flexible key lookup: try multiple possible column names
+  const findValue = (row: any, ...keys: string[]): string => {
+    for (const key of keys) {
+      // Try exact match first, then case-insensitive
+      if (row[key] !== undefined && row[key] !== null) return row[key].toString().trim();
+      const found = Object.keys(row).find(k => k.toLowerCase().replace(/[^a-z0-9]/g, '') === key.toLowerCase().replace(/[^a-z0-9]/g, ''));
+      if (found && row[found] !== undefined && row[found] !== null) return row[found].toString().trim();
+    }
+    return '';
+  };
+
+  return jsonData
+    .map((row): Code | null => {
+      const name = findValue(row, 'Name', 'Code', 'Label', 'Code Name', 'Theme', 'Category');
+      if (!name) return null;
+
+      const rawColor = findValue(row, 'Color', 'Colour', 'Hex', 'HexColor');
+      const isValidColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(rawColor);
+
+      return {
+        id: generateId(),
+        name,
+        description: findValue(row, 'Description', 'Definition', 'Desc', 'Meaning', 'Details', 'Memo'),
+        color: isValidColor ? rawColor : `#${Math.floor(Math.random() * 16777215).toString(16).padStart(6, '0')}`,
+        parentId: findValue(row, 'ParentID', 'Parent', 'ParentCode', 'ParentName', 'Group', 'Hierarchy') || undefined,
+        inclusionCriteria: findValue(row, 'InclusionCriteria', 'Inclusion', 'Include', 'When to Use') || undefined,
+        exclusionCriteria: findValue(row, 'ExclusionCriteria', 'Exclusion', 'Exclude', 'When Not to Use') || undefined,
+        examples: findValue(row, 'Examples', 'Example', 'Sample', 'Samples', 'Example Quotes') || undefined,
+      };
+    })
+    .filter((c): c is Code => c !== null);
 };
 
-export const parseCodebookCSV = (csvText: string): Code[] => {
-  const lines = csvText.split(/\r?\n/);
-  if (lines.length < 2) return [];
+// ─── Robust CSV / TSV Parsing ───
 
-  const csvRegex = /(?:^|,)(?:"([^"]*(?:""[^"]*)*)"|([^",]*))/g;
-  const parseLine = (line: string) => {
-    const result: string[] = [];
-    let match;
-    const regex = new RegExp(csvRegex);
-    while ((match = regex.exec(line)) !== null) {
-      let val = match[1] ? match[1].replace(/""/g, '"') : match[2];
-      result.push(val ? val.trim() : '');
+/**
+ * Detect the most likely delimiter by counting occurrences in the first few lines.
+ */
+function detectDelimiter(text: string): string {
+  const sampleLines = text.split(/\r?\n/).slice(0, 5).join('\n');
+  const counts: Record<string, number> = { ',': 0, '\t': 0, ';': 0 };
+  // Only count delimiters outside of quoted fields
+  let inQuotes = false;
+  for (const ch of sampleLines) {
+    if (ch === '"') { inQuotes = !inQuotes; continue; }
+    if (!inQuotes && (ch in counts)) counts[ch]++;
+  }
+  // Return the delimiter with the highest count, defaulting to comma
+  const best = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  return best[1] > 0 ? best[0] : ',';
+}
+
+/**
+ * RFC 4180-compliant CSV line parser that handles quoted fields.
+ */
+function parseCSVLine(line: string, delimiter: string): string[] {
+  const fields: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let i = 0;
+
+  while (i < line.length) {
+    const ch = line[i];
+
+    if (inQuotes) {
+      if (ch === '"') {
+        if (i + 1 < line.length && line[i + 1] === '"') {
+          // Escaped quote
+          current += '"';
+          i += 2;
+        } else {
+          // End of quoted field
+          inQuotes = false;
+          i++;
+        }
+      } else {
+        current += ch;
+        i++;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+        i++;
+      } else if (ch === delimiter) {
+        fields.push(current.trim());
+        current = '';
+        i++;
+      } else {
+        current += ch;
+        i++;
+      }
     }
-    return result[result.length - 1] === '' ? result.slice(0, -1) : result;
-  };
+  }
 
-  const headerRow = parseLine(lines[0]).map(h => h.toLowerCase().trim());
-  const map = {
-    name: headerRow.findIndex(h => h.includes('name') || h.includes('code') || h.includes('label')),
-    desc: headerRow.findIndex(h => h.includes('desc') || h.includes('definition')),
-    color: headerRow.findIndex(h => h.includes('color')),
+  fields.push(current.trim());
+  return fields;
+}
+
+/**
+ * Parse full CSV/TSV text into an array of row arrays, handling multi-line quoted fields.
+ */
+function parseCSVText(text: string, delimiter: string): string[][] {
+  const rows: string[][] = [];
+  let currentLine = '';
+  let inQuotes = false;
+
+  for (const ch of text) {
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      currentLine += ch;
+    } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+      if (currentLine.trim().length > 0) {
+        rows.push(parseCSVLine(currentLine, delimiter));
+      }
+      currentLine = '';
+    } else {
+      currentLine += ch;
+    }
+  }
+
+  // Don't forget the last line
+  if (currentLine.trim().length > 0) {
+    rows.push(parseCSVLine(currentLine, delimiter));
+  }
+
+  return rows;
+}
+
+/**
+ * Generate a random color with good saturation and brightness using HSL.
+ */
+function randomCodeColor(): string {
+  const hue = Math.floor(Math.random() * 360);
+  const sat = 55 + Math.floor(Math.random() * 30); // 55-85%
+  const light = 45 + Math.floor(Math.random() * 15); // 45-60%
+  // Convert HSL to hex
+  const h = hue / 360;
+  const s = sat / 100;
+  const l = light / 100;
+  const hue2rgb = (p: number, q: number, t: number) => {
+    if (t < 0) t += 1;
+    if (t > 1) t -= 1;
+    if (t < 1 / 6) return p + (q - p) * 6 * t;
+    if (t < 1 / 2) return q;
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+    return p;
   };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  const r = Math.round(hue2rgb(p, q, h + 1 / 3) * 255);
+  const g = Math.round(hue2rgb(p, q, h) * 255);
+  const b = Math.round(hue2rgb(p, q, h - 1 / 3) * 255);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
+/**
+ * Fuzzy match a header against known aliases for each field.
+ */
+function matchHeader(header: string): string | null {
+  const h = header.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const mapping: [string[], string][] = [
+    [['name', 'code', 'codename', 'label', 'theme', 'category'], 'name'],
+    [['description', 'definition', 'desc', 'meaning', 'detail', 'details', 'memo'], 'description'],
+    [['color', 'colour', 'hex', 'hexcolor'], 'color'],
+    [['parent', 'parentid', 'parentcode', 'parentname', 'group', 'hierarchy', 'folder'], 'parentId'],
+    [['inclusion', 'inclusioncriteria', 'include', 'whentouse', 'inclusionrule', 'inclusionrules'], 'inclusionCriteria'],
+    [['exclusion', 'exclusioncriteria', 'exclude', 'whennotetouse', 'exclusionrule', 'exclusionrules'], 'exclusionCriteria'],
+    [['example', 'examples', 'sample', 'samples', 'examplequote', 'examplequotes', 'quotes'], 'examples'],
+  ];
+
+  for (const [aliases, field] of mapping) {
+    if (aliases.some(alias => h === alias || h.includes(alias))) {
+      return field;
+    }
+  }
+  return null;
+}
+
+export const parseCodebookCSV = (csvText: string): Code[] => {
+  const delimiter = detectDelimiter(csvText);
+  const allRows = parseCSVText(csvText, delimiter);
+  if (allRows.length < 2) return [];
+
+  const headerRow = allRows[0];
+  const dataRows = allRows.slice(1);
+
+  // Map headers → field names
+  const columnMap: Record<number, string> = {};
+  let hasNameColumn = false;
+  headerRow.forEach((header, idx) => {
+    const field = matchHeader(header);
+    if (field) {
+      columnMap[idx] = field;
+      if (field === 'name') hasNameColumn = true;
+    }
+  });
+
+  // Fallback: if no recognizable 'name' column, assume first column is name,
+  // second is description (common simple format)
+  if (!hasNameColumn) {
+    if (headerRow.length >= 1) columnMap[0] = 'name';
+    if (headerRow.length >= 2) columnMap[1] = 'description';
+    if (headerRow.length >= 3) columnMap[2] = 'color';
+  }
 
   const newCodes: Code[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    if (!lines[i].trim()) continue;
-    const row = parseLine(lines[i]);
-    if (map.name > -1 && row[map.name]) {
-      newCodes.push({
-        id: generateId(),
-        name: row[map.name].trim(),
-        description: map.desc > -1 ? row[map.desc].trim() : '',
-        color: map.color > -1 && row[map.color] ? row[map.color].trim() : `#${Math.floor(Math.random() * 16777215).toString(16)}`,
-      });
+  for (const row of dataRows) {
+    const fields: Record<string, string> = {};
+    for (const [idxStr, fieldName] of Object.entries(columnMap)) {
+      const idx = parseInt(idxStr, 10);
+      if (idx < row.length) {
+        fields[fieldName] = row[idx];
+      }
     }
+
+    const name = (fields['name'] || '').trim();
+    if (!name) continue;
+
+    const color = (fields['color'] || '').trim();
+    const isValidColor = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})$/.test(color);
+
+    newCodes.push({
+      id: generateId(),
+      name,
+      description: (fields['description'] || '').trim(),
+      color: isValidColor ? color : randomCodeColor(),
+      parentId: (fields['parentId'] || '').trim() || undefined,
+      inclusionCriteria: (fields['inclusionCriteria'] || '').trim() || undefined,
+      exclusionCriteria: (fields['exclusionCriteria'] || '').trim() || undefined,
+      examples: (fields['examples'] || '').trim() || undefined,
+    });
   }
   return newCodes;
 };

@@ -17,23 +17,19 @@ export const generateColor = (index: number): string => {
 // Generate a hierarchical shade
 // If parent is Red, child will be a lighter/darker Red
 export const generateChildColor = (parentColor: string, siblingIndex: number): string => {
-  // Simple Hex to HSL conversion would be ideal, but for robustness without deps:
-  // We will simply lighten or darken string manipulation if simple hex, 
-  // or return a variation if we can't parse it.
-  
-  // For this demo, we'll try a simple opacity/overlay trick or shift
-  // In a real prod app, use 'tinycolor2' library.
-  // Here is a basic "Lighten" hex logic:
-  
-  const num = parseInt(parentColor.replace("#",""), 16);
-  const amt = (siblingIndex % 2 === 0) ? 20 : -20; // Alternating lighter/darker
-  
-  let r = (num >> 16) + amt;
-  let b = ((num >> 8) & 0x00FF) + amt;
-  let g = (num & 0x0000FF) + amt;
+  const num = parseInt(parentColor.replace("#", ""), 16);
+  // Alternate between lighter and darker, with increasing offset for each sibling
+  const direction = siblingIndex % 2 === 0 ? 1 : -1;
+  const magnitude = 20 + Math.floor(siblingIndex / 2) * 15;
+  const amt = direction * magnitude;
 
-  const newColor = g | (b << 8) | (r << 16);
-  return "#" + (0x1000000 + (newColor<255?newColor<1?0:newColor:255)*0x1000000).toString(16).slice(1);
+  const clamp = (v: number) => Math.max(0, Math.min(255, v));
+
+  const r = clamp(((num >> 16) & 0xFF) + amt);
+  const g = clamp(((num >> 8) & 0xFF) + amt);
+  const b = clamp((num & 0xFF) + amt);
+
+  return "#" + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1);
 };
 
 export const getContrastText = (hexColor: string): string => {
