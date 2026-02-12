@@ -48,7 +48,6 @@ export const VisualSettings: React.FC<Props> = ({ settings, onUpdate }) => {
             <option value="sans">Clean Sans (Inter)</option>
             <option value="serif">Academic Serif (Merriweather)</option>
             <option value="mono">Monospace (Code)</option>
-            <option value="dyslexic">OpenDyslexic</option>
             <option value="times">Times New Roman</option>
             <option value="arial">Arial</option>
             <option value="georgia">Georgia</option>

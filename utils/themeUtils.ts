@@ -17,29 +17,29 @@ export const applyTheme = (theme: AppTheme) => {
       '--zebra-odd': '#e2e8f0',     // [MODIFIED] Darker for visibility (Slate 200)
     },
     hobbit: {
-      '--bg-main': '#e4d8b4',       // Parchment
+      '--bg-main': '#e6d5c3',       // Warmer Light Brown / Tan
       '--bg-panel': '#fdf6e3',      // Light Parchment
-      '--bg-header': '#2c3e28',     // Deep Forest Green
+      '--bg-header': '#4a3728',     // Dark Leather Brown
       '--text-main': '#433422',     // Dark Brown
       '--text-muted': '#8c7b64',    // Light Brown
       '--border': '#d3c6a0',        // Darker Parchment
-      '--accent': '#5c7c35',        // Leaf Green
+      '--accent': '#6b8c42',        // Moss Green (kept green for hobbit feel, but could change if requested)
       '--accent-text': '#ffffff',
       '--bg-paper': '#fdf6e3',      // Paper Color (match panel)
       '--zebra-odd': '#f2e9c9',
     },
-    // Renamed 'dark' to Night Mode (Rainbow / High Contrast)
+    // Modern Dark Mode (Softened)
     dark: {
-      '--bg-main': '#000000',       // Pure Black
-      '--bg-panel': '#121212',      // Off Black
-      '--bg-header': '#1a1a1a',     // Dark Grey
-      '--text-main': '#d4d4d4',     // Light Grey
-      '--text-muted': '#a8a29e',    // Warm Grey/Brown
+      '--bg-main': '#121212',       // Dark Grey (Material Dark)
+      '--bg-panel': '#1e1e1e',      // Slightly lighter grey
+      '--bg-header': '#2d2d2d',     // Lighter header
+      '--text-main': '#e0e0e0',     // Off-white
+      '--text-muted': '#a0a0a0',    // Grey
       '--border': '#404040',        // Neutral Grey
-      '--accent': '#d97706',        // Amber 600 (Brownish-Orange) for Rainbow feel
-      '--accent-text': '#000000',
-      '--bg-paper': '#000000',      // Pure Black Paper
-      '--zebra-odd': '#1c1c1c',     // Very subtle change for zebra
+      '--accent': '#8b5cf6',        // Violet 500 (Vibrant but not orange)
+      '--accent-text': '#ffffff',
+      '--bg-paper': '#1e1e1e',      // Dark Paper
+      '--zebra-odd': '#262626',     // Subtle stripe
     },
     // Updated Blue Dark (Ocean) to be more distinct Blue
     bluedark: {

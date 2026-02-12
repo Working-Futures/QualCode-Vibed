@@ -8,6 +8,7 @@ import { VisualSettings } from './components/VisualSettings';
 import { ProjectLauncher } from './components/ProjectLauncher';
 import { MemoSidebar } from './components/MemoSidebar';
 import { CollaborationPanel } from './components/CollaborationPanel';
+import { TranscriptEditorModal } from './components/TranscriptEditorModal';
 import { useAuth } from './contexts/AuthContext';
 import {
   getCloudProject,
@@ -67,6 +68,7 @@ export default function App() {
   const [showCollabPanel, setShowCollabPanel] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(defaultSettings);
   const [sidebarWidth, setSidebarWidth] = useState(288);
+  const [editingTranscriptId, setEditingTranscriptId] = useState<string | null>(null);
 
   const [transcriptMenu, setTranscriptMenu] = useState<{ id: string, x: number, y: number } | null>(null);
 
@@ -91,6 +93,17 @@ export default function App() {
   const [codeSearchQuery, setCodeSearchQuery] = useState('');
 
   // --- Effects ---
+
+  // Save/Load Settings
+  useEffect(() => {
+    const saved = localStorage.getItem('appSettings');
+    if (saved) {
+      try { setAppSettings(JSON.parse(saved)); } catch (e) { console.error(e); }
+    }
+  }, []);
+  useEffect(() => {
+    localStorage.setItem('appSettings', JSON.stringify(appSettings));
+  }, [appSettings]);
 
   // Auto-save to LocalStorage per 30 seconds to prevent data loss
   useEffect(() => {
@@ -614,32 +627,34 @@ export default function App() {
             </div>
           )}
 
-          {/* Collaboration Button (Cloud only) */}
+          {/* Collaboration Button */}
           {cloudProject && (
             <button
               onClick={() => setShowCollabPanel(!showCollabPanel)}
-              className={`p-2 rounded transition-colors ${showCollabPanel ? 'bg-purple-500/30 text-purple-300' : 'text-slate-300 hover:bg-white/10'}`}
+              className={`px-3 py-1.5 rounded transition-colors flex items-center gap-2 text-xs font-bold ${showCollabPanel ? 'bg-purple-600 text-white' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`}
               title="Collaboration"
             >
-              <Users size={18} />
+              <Users size={16} /> Team
             </button>
           )}
 
           <button
             onClick={() => setShowVisualSettings(!showVisualSettings)}
-            className={`p-2 rounded hover:bg-white/10 transition-colors ${showVisualSettings ? 'bg-white/20 text-[var(--accent)]' : 'text-slate-300'}`}
+            className={`px-3 py-1.5 rounded transition-colors flex items-center gap-2 text-xs font-bold ${showVisualSettings ? 'bg-white/20 text-[var(--accent)]' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`}
             title="Visual Settings"
           >
-            <Eye size={20} />
+            <Eye size={16} /> Theme
           </button>
 
           <div className="h-6 w-px bg-white/20 mx-1"></div>
 
           <button
             onClick={handleSaveProject}
-            className="px-3 py-1.5 bg-[var(--accent)] hover:brightness-110 rounded text-xs font-bold text-[var(--accent-text)] shadow-sm transition-all flex items-center gap-2"
+            className={`px-3 py-1.5 rounded text-xs font-bold shadow-sm transition-all flex items-center gap-2 ${cloudProject ? 'bg-blue-600 hover:bg-blue-500 text-white' : 'bg-[var(--accent)] hover:brightness-110 text-[var(--accent-text)]'}`}
+            title={cloudProject ? "Force Sync to Cloud" : "Export Local File (.qlab)"}
           >
-            <Save size={14} /> Save
+            {cloudProject ? <Cloud size={14} /> : <Save size={14} />}
+            {cloudProject ? "Cloud Save" : "Export File"}
           </button>
 
           <button
@@ -859,6 +874,23 @@ export default function App() {
         />
       )}
 
+      {/* Transcript Editor Modal */}
+      {editingTranscriptId && (
+        <TranscriptEditorModal
+          transcript={project.transcripts.find(t => t.id === editingTranscriptId)!}
+          onClose={() => setEditingTranscriptId(null)}
+          onSave={(newContent) => {
+            // Update project with new content and remove selections for this transcript
+            handleProjectUpdate({
+              ...project,
+              transcripts: project.transcripts.map(t => t.id === editingTranscriptId ? { ...t, content: newContent } : t),
+              selections: project.selections.filter(s => s.transcriptId !== editingTranscriptId)
+            });
+            setEditingTranscriptId(null);
+          }}
+        />
+      )}
+
       {/* Floating Transcript Menu */}
       {transcriptMenu && (
         <>
@@ -868,10 +900,16 @@ export default function App() {
             style={{ top: transcriptMenu.y, left: transcriptMenu.x }}
           >
             <button
+              onClick={() => { setEditingTranscriptId(transcriptMenu.id); setTranscriptMenu(null); }}
+              className="px-3 py-2 hover:bg-[var(--bg-main)] text-left flex items-center gap-2 text-sm text-[var(--text-main)]"
+            >
+              <Edit2 size={12} /> Edit Text
+            </button>
+            <button
               onClick={() => { renameTranscript(transcriptMenu.id); setTranscriptMenu(null); }}
               className="px-3 py-2 hover:bg-[var(--bg-main)] text-left flex items-center gap-2 text-sm text-[var(--text-main)]"
             >
-              <Edit2 size={12} /> Rename
+              <FileText size={12} /> Rename
             </button>
             <button
               onClick={() => { deleteTranscriptHandler(transcriptMenu.id); setTranscriptMenu(null); }}

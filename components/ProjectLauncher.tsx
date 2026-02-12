@@ -31,7 +31,7 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
   const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [loadingCloud, setLoadingCloud] = useState(false);
-  const [activeTab, setActiveTab] = useState<'local' | 'cloud'>('local');
+  const [activeTab, setActiveTab] = useState<'local' | 'cloud'>('cloud');
   const [showNewCloudDialog, setShowNewCloudDialog] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
@@ -192,13 +192,13 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
         style={{ display: 'none' }}
       />
 
-      <div className="w-full max-w-5xl bg-white rounded-2xl shadow-2xl overflow-hidden flex h-[650px]">
+      <div className="w-full max-w-5xl rounded-2xl shadow-2xl overflow-hidden flex h-[650px] border border-[var(--border)]">
         {/* Left Panel */}
-        <div className="w-2/5 bg-slate-900 p-8 text-white flex flex-col justify-between">
+        <div className="w-2/5 p-8 flex flex-col justify-between" style={{ backgroundColor: 'var(--bg-header)', color: '#ffffff' }}>
           <div>
             <div className="mb-6">
               <h1 className="text-3xl font-bold">QualCode Vibed</h1>
-              <p className="text-slate-400 text-sm">Qualitative Analysis Tool</p>
+              <p className="opacity-70 text-sm">Qualitative Analysis Tool</p>
             </div>
 
             {/* Auth Section */}
@@ -245,24 +245,24 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
             )}
 
             {/* Tab Toggle */}
-            <div className="flex bg-slate-800 rounded-lg p-1 mb-6">
-              <button
-                onClick={() => setActiveTab('local')}
-                className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-all flex items-center justify-center gap-2 ${activeTab === 'local'
-                    ? 'bg-slate-700 text-white shadow'
-                    : 'text-slate-400 hover:text-white'
-                  }`}
-              >
-                <HardDrive size={14} /> Local
-              </button>
+            <div className="flex bg-black/20 rounded-lg p-1 mb-6">
               <button
                 onClick={() => setActiveTab('cloud')}
                 className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-all flex items-center justify-center gap-2 ${activeTab === 'cloud'
-                    ? 'bg-blue-600 text-white shadow'
-                    : 'text-slate-400 hover:text-white'
+                  ? 'bg-blue-600 text-white shadow'
+                  : 'text-white/50 hover:text-white'
                   }`}
               >
                 <Cloud size={14} /> Cloud
+              </button>
+              <button
+                onClick={() => setActiveTab('local')}
+                className={`flex-1 py-2 px-3 rounded-md text-sm font-medium transition-all flex items-center justify-center gap-2 ${activeTab === 'local'
+                  ? 'bg-white/20 text-white shadow'
+                  : 'text-white/50 hover:text-white'
+                  }`}
+              >
+                <HardDrive size={14} /> Local
               </button>
             </div>
 
@@ -321,15 +321,15 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
           </div>
 
           <div>
-            <div className="text-xs text-slate-500">v2.0.0 (Cloud + Collaboration)</div>
-            <button onClick={loadAutosave} className="mt-2 text-xs text-orange-400 hover:text-orange-300 underline text-left">
+            <div className="text-xs opacity-50">v2.1.0 (Cloud + Collaboration)</div>
+            <button onClick={loadAutosave} className="mt-2 text-xs text-orange-300 hover:text-orange-200 underline text-left">
               Recover Unsaved Work
             </button>
           </div>
         </div>
 
         {/* Right Panel */}
-        <div className="flex-1 p-8 bg-slate-50 flex flex-col overflow-hidden">
+        <div className="flex-1 p-8 flex flex-col overflow-hidden" style={{ backgroundColor: 'var(--bg-main)', color: 'var(--text-main)' }}>
           {activeTab === 'local' ? (
             <>
               <h2 className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-4 flex items-center">
@@ -433,7 +433,7 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
                   cloudProjects.map((proj) => (
                     <div
                       key={proj.id}
-                      className="group bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all cursor-pointer"
+                      className="group p-4 rounded-xl border border-[var(--border)] shadow-sm hover:shadow-md transition-all cursor-pointer bg-[var(--bg-panel)] hover:border-blue-500/50"
                       onClick={() => onOpenCloudProject(proj)}
                     >
                       <div className="flex items-center justify-between">
@@ -442,8 +442,8 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
                             <Cloud size={20} />
                           </div>
                           <div className="min-w-0">
-                            <h3 className="font-semibold text-slate-700 group-hover:text-blue-700 truncate">{proj.name}</h3>
-                            <div className="flex items-center gap-2 text-xs text-slate-400">
+                            <h3 className="font-semibold text-[var(--text-main)] group-hover:text-blue-500 truncate">{proj.name}</h3>
+                            <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
                               <span>Modified {new Date(proj.lastModified).toLocaleDateString()}</span>
                               {Object.keys(proj.members).length > 1 && (
                                 <span className="flex items-center gap-1 text-purple-500">
