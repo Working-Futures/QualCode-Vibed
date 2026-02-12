@@ -299,6 +299,7 @@ export async function acceptInvitation(
     await updateDoc(projectRef, {
         [`members.${userId}`]: member,
         memberEmails: arrayUnion(userEmail.toLowerCase()),
+        lastInviteAccepted: invitation.id // Security token for rules
     });
 
     // Initialize user's project data

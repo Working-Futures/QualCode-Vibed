@@ -16,9 +16,20 @@ service cloud.firestore {
       allow read: if request.auth != null &&
         request.auth.token.email in resource.data.memberEmails;
 
-      // Members can update (admin for metadata, collab for limited fields)
-      allow update: if request.auth != null &&
-        request.auth.token.email in resource.data.memberEmails;
+      // Members can update
+      allow update: if request.auth != null && (
+        // Case 1: Already a member
+        request.auth.token.email in resource.data.memberEmails ||
+        // Case 2: Joining via Invitation
+        (
+          // Ensure only adding themselves/updating member list
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberEmails', 'lastInviteAccepted']) &&
+          // Verify the invitation token
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.lastInviteAccepted)).data.projectId == projectId &&
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.lastInviteAccepted)).data.invitedEmail == request.auth.token.email &&
+          get(/databases/$(database)/documents/invitations/$(request.resource.data.lastInviteAccepted)).data.status == 'accepted'
+        )
+      );
 
       // Only owner can delete
       allow delete: if request.auth != null &&
