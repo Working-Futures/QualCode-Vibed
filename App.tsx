@@ -75,7 +75,13 @@ export default function App() {
   const [cloudSaving, setCloudSaving] = useState(false);
   const [cloudSyncStatus, setCloudSyncStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
-  // Debounce timer for cloud saves
+  // Refs for auto-save logic
+  const projectRef = useRef<Project | null>(null);
+  const cloudProjectRef = useRef<CloudProject | null>(null);
+  const userRef = useRef<typeof user>(null);
+  const lastSavedTime = useRef<number>(Date.now());
+
+  // Debounce ref (unused now but kept if needed for other things, or removing)
   const cloudSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Search States
@@ -96,19 +102,6 @@ export default function App() {
     return () => clearInterval(saveInterval);
   }, [project]);
 
-  // Warn user before closing the tab with unsaved work
-  useEffect(() => {
-    if (!project) return;
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      // Do a final local autosave
-      localStorage.setItem('autosave_project', JSON.stringify(project));
-      // Browser will show a generic "are you sure?" dialog
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [project]);
 
   const undo = useCallback(() => {
     if (historyIndex > 0) {
@@ -239,6 +232,7 @@ export default function App() {
         projectMemo: currentProject.projectMemo || '',
       });
 
+      lastSavedTime.current = currentProject.lastModified;
       setCloudSyncStatus('saved');
       setTimeout(() => setCloudSyncStatus('idle'), 2000);
     } catch (err) {
@@ -248,17 +242,50 @@ export default function App() {
     }
   }, []);
 
-  const debouncedCloudSave = useCallback((updatedProject: Project) => {
-    if (!cloudProject || !user) return;
+  // ─── Auto-Save Logic ───
 
-    if (cloudSaveTimer.current) {
-      clearTimeout(cloudSaveTimer.current);
-    }
+  // Sync refs for proper interval access to avoid stale closures
+  useEffect(() => { projectRef.current = project; }, [project]);
+  useEffect(() => { cloudProjectRef.current = cloudProject; }, [cloudProject]);
+  useEffect(() => { userRef.current = user; }, [user]);
 
-    cloudSaveTimer.current = setTimeout(() => {
-      saveToCloud(updatedProject, cloudProject, user);
-    }, 3000); // 3 second debounce
-  }, [cloudProject, user, saveToCloud]);
+  // Auto-save Interval (Every 5 seconds)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const p = projectRef.current;
+      const cp = cloudProjectRef.current;
+      const u = userRef.current;
+
+      if (p && cp && u) {
+        // Check if modified since last save
+        if (p.lastModified > lastSavedTime.current) {
+          saveToCloud(p, cp, u);
+          // lastSavedTime is updated inside saveToCloud on success
+        }
+      }
+    }, 5000); // Check every 5 seconds
+    return () => clearInterval(interval);
+  }, [saveToCloud]);
+
+  // Warn user before closing tab ONLY if unsaved
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const p = projectRef.current;
+      // Only warn if dirty and unsaved
+      if (p && cloudProjectRef.current && p.lastModified > lastSavedTime.current) {
+        // Attempt immediate save (fire & forget, best effort)
+        saveToCloud(p, cloudProjectRef.current, userRef.current!);
+
+        // Show browser warning
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [saveToCloud]);
+
+
 
   // ─── Open Cloud Project ───
   const openCloudProject = async (cp: CloudProject) => {
@@ -337,11 +364,6 @@ export default function App() {
     setHistoryIndex(newHistory.length - 1);
 
     setProject(p);
-
-    // If cloud project, debounce save to cloud
-    if (cloudProject && user) {
-      debouncedCloudSave(p);
-    }
   };
 
 
