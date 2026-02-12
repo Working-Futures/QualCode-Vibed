@@ -2,6 +2,7 @@
   "name": "qual-analyst-pro",
   "private": true,
   "version": "0.0.0",
+  "homepage": "https://Working-Futures.github.io/QualCode-Vibed",
   "type": "module",
   "scripts": {
     "dev": "vite",
