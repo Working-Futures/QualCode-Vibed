@@ -19,7 +19,7 @@ export const applyTheme = (theme: AppTheme) => {
     hobbit: {
       '--bg-main': '#e6d5c3',       // Warmer Light Brown / Tan
       '--bg-panel': '#fdf6e3',      // Light Parchment
-      '--bg-header': '#4a3728',     // Dark Leather Brown
+      '--bg-header': '#2c3e28',     // Deep Forest Green (Reverted)
       '--text-main': '#433422',     // Dark Brown
       '--text-muted': '#8c7b64',    // Light Brown
       '--border': '#d3c6a0',        // Darker Parchment
