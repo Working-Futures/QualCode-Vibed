@@ -8,6 +8,9 @@ export interface Code {
   exclusionCriteria?: string;
   examples?: string;
   memo?: string;  // Code-level analytical memo
+  type?: 'master' | 'personal' | 'suggested';
+  createdBy?: string;
+  suggestedBy?: string; // ID of user who suggested it
 }
 
 export interface Selection {
@@ -113,6 +116,50 @@ export interface Invitation {
   createdAt: number;
 }
 
+export interface StickyNote {
+  id: string;
+  transcriptId?: string;
+  content: string;
+  authorId: string;
+  authorName: string;
+  color: string;
+  x: number; // Percentage (0-100) or pixels
+  y: number; // Percentage (0-100) or pixels
+  timestamp: number;
+  shared?: boolean; // If true, visible to all team members; default is private
+}
+
+export interface ChatMessage {
+  id: string;
+  projectId: string;
+  senderId: string;
+  senderName: string;
+  content: string;
+  timestamp: number;
+  readBy: string[];
+  replyTo?: {
+    id: string;
+    senderName: string;
+    content: string;
+  };
+  editedAt?: number;
+  mentions?: string[]; // Array of mentioned user display names
+}
+
+export interface DirectMessage {
+  id: string;
+  projectId: string;
+  fromId: string;
+  fromName: string;
+  toId: string;
+  toName: string;
+  content: string;
+  timestamp: number;
+  readBy: string[];
+  /** Conversation key: sorted pair of user IDs joined by '_' */
+  conversationKey: string;
+}
+
 export interface UserProfile {
   uid: string;
   email: string;
@@ -120,4 +167,30 @@ export interface UserProfile {
   photoURL: string;
   settings?: AppSettings;
   createdAt: number;
+}
+
+export interface TranscriptChangeRequest {
+  id: string;
+  projectId: string;
+  transcriptId: string;
+  transcriptName: string;
+  userId: string;
+  userName: string;
+  content: string;
+  originalContent: string;
+  timestamp: number;
+  status: 'pending' | 'accepted' | 'rejected';
+}
+
+export interface CodeHistoryEntry {
+  id: string; // Document ID
+  codeId: string;
+  projectId: string;
+  previousData: Partial<Code>;
+  newData: Partial<Code>;
+  changeType: 'create' | 'update' | 'delete' | 'merge';
+  userId: string; // The user who made the change
+  userName: string;
+  timestamp: number;
+  description?: string; // e.g. "Changed color from Red to Blue"
 }

@@ -93,11 +93,30 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
     }
   };
 
-  const loadAutosave = () => {
+  const loadAutosave = async () => {
     const saved = localStorage.getItem('autosave_project');
     if (saved) {
       if (confirm("Found an unsaved project recovered from browser storage. Would you like to load it?")) {
-        onOpenProject(JSON.parse(saved));
+        const p = JSON.parse(saved);
+        if (p.isCloud && p.cloudProjectId && user) {
+          setLoadingCloud(true);
+          try {
+            const cp = await import('../services/firestoreService').then(m => m.getCloudProject(p.cloudProjectId));
+            if (cp) {
+              onOpenCloudProject(cp);
+            } else {
+              alert("Could not reconnect to cloud project. Opening as local copy.");
+              onOpenProject(p);
+            }
+          } catch (e) {
+            console.error(e);
+            onOpenProject(p); // Fallback
+          } finally {
+            setLoadingCloud(false);
+          }
+        } else {
+          onOpenProject(p);
+        }
       }
     } else {
       alert("No recovered project found.");

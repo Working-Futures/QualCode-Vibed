@@ -84,21 +84,58 @@ export const restoreHighlights = (contentHtml: string, selections: Selection[], 
         range.setStart(startNode, startOffset);
         range.setEnd(endNode, endOffset);
 
-        const span = document.createElement('span');
-        span.className = "coded-segment cursor-pointer transition-colors";
-        span.dataset.codeId = code.id;
-        span.dataset.selectionId = sel.id;
-        span.title = code.name;
+        // Instead of extracting the whole range (which breaks block structure if multi-line),
+        // we iterate over text nodes and wrap them individually.
+        const walker = document.createTreeWalker(
+          tempDiv,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: (node) => range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+          }
+        );
 
-        span.style.textDecoration = 'underline';
-        span.style.textDecorationColor = code.color;
-        span.style.backgroundColor = `${code.color}40`;
+        const textNodes: Text[] = [];
+        let currentNode = walker.nextNode();
+        while (currentNode) {
+          textNodes.push(currentNode as Text);
+          currentNode = walker.nextNode();
+        }
 
-        const fragment = range.extractContents();
-        span.appendChild(fragment);
-        range.insertNode(span);
+        textNodes.forEach(node => {
+          const isStart = node === startNode;
+          const isEnd = node === endNode;
+
+          let sOffset = 0;
+          let eOffset = node.length;
+
+          if (isStart) sOffset = startOffset;
+          if (isEnd) eOffset = endOffset;
+
+          if (sOffset === eOffset) return;
+
+          let targetNode = node;
+          // Split end first to keep offsets valid
+          if (eOffset < node.length) targetNode.splitText(eOffset);
+          if (sOffset > 0) targetNode = targetNode.splitText(sOffset);
+
+          const span = document.createElement('span');
+          span.className = "coded-segment cursor-pointer transition-colors";
+          span.dataset.codeId = code.id;
+          span.dataset.selectionId = sel.id;
+          span.title = code.name;
+          span.style.textDecoration = 'underline';
+          span.style.textDecorationColor = code.color;
+          span.style.backgroundColor = `${code.color}40`;
+
+          const parent = targetNode.parentNode;
+          if (parent) {
+            parent.insertBefore(span, targetNode);
+            span.appendChild(targetNode);
+          }
+        });
+
       } catch (e) {
-        // Overlap or complex structure
+        console.error("Error applying highlight:", e);
       }
     }
   });

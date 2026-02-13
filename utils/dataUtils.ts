@@ -396,10 +396,18 @@ export const parseCodebookCSV = (csvText: string): Code[] => {
 
 export const mergeCodesInProject = (project: Project, sourceCodeId: string, targetCodeId: string): Project => {
   if (sourceCodeId === targetCodeId) return project;
+
+  // 1. Reassign selections
   const updatedSelections = project.selections.map(sel =>
     sel.codeId === sourceCodeId ? { ...sel, codeId: targetCodeId } : sel
   );
-  const updatedCodes = project.codes.filter(c => c.id !== sourceCodeId);
+
+  // 2. Reparent children (codes that had sourceCodeId as parent)
+  //    They will now point to targetCodeId.
+  const updatedCodes = project.codes
+    .filter(c => c.id !== sourceCodeId) // Remove the source code
+    .map(c => c.parentId === sourceCodeId ? { ...c, parentId: targetCodeId } : c);
+
   return {
     ...project,
     selections: updatedSelections,

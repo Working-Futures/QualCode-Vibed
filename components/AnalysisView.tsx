@@ -1,99 +1,189 @@
-import React, { useState, useMemo } from 'react';
-import { Project } from '../types';
-import { X, Download, Filter, BarChart as IconChart, FileText } from 'lucide-react';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Project, CollaboratorData } from '../types';
+import { X, Download, Filter, BarChart as IconChart, Users, RefreshCw } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { getAllCollaboratorData } from '../services/firestoreService';
 
 interface Props {
     project: Project;
     onClose: () => void;
     onExport: () => void;
+    cloudProjectId?: string;
+    currentUserId?: string;
+    cloudProject?: { members: Record<string, any> } | null;
 }
 
-export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) => {
+export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport, cloudProjectId, currentUserId, cloudProject }) => {
     const [viewMode, setViewMode] = useState<'chart' | 'table' | 'segments' | 'cooccurrence'>('chart');
     const [selectedFamilyIds, setSelectedFamilyIds] = useState<string[]>([]);
 
-    const { chartData, filteredCodes, allSelections } = useMemo(() => {
+    // Comparison State
+    const [compareMode, setCompareMode] = useState(false);
+    const [collaboratorData, setCollaboratorData] = useState<CollaboratorData[]>([]);
+    const [loadingCollab, setLoadingCollab] = useState(false);
+    const [selectedUsers, setSelectedUsers] = useState<string[]>([]); // Empty = All
+
+    useEffect(() => {
+        if (compareMode && cloudProjectId && collaboratorData.length === 0) {
+            loadCollaboratorData();
+        }
+    }, [compareMode, cloudProjectId]);
+
+    const loadCollaboratorData = async () => {
+        if (!cloudProjectId || !currentUserId) return;
+        setLoadingCollab(true);
+        try {
+            // Fetch ALL collaborator data (don't exclude self, we want everyone for comparison)
+            const data = await getAllCollaboratorData(cloudProjectId, '__FETCH_ALL__');
+
+            // Filter to only include actual current project members
+            const memberIds = cloudProject ? new Set(Object.keys(cloudProject.members)) : null;
+            const filteredData = memberIds
+                ? data.filter(d => memberIds.has(d.userId))
+                : data;
+
+            setCollaboratorData(filteredData);
+        } catch (err) {
+            console.error(err);
+        } finally {
+            setLoadingCollab(false);
+        }
+    };
+
+    const { chartData, filteredCodes, allSelections, userKeys } = useMemo(() => {
         const allCodes = project.codes;
         let displayCodes = allCodes;
 
         if (selectedFamilyIds.length > 0) {
             displayCodes = allCodes.filter(c => {
-                // If it's a root code, check if it is selected
                 if (!c.parentId) return selectedFamilyIds.includes(c.id);
-                // If it's a child code, check if its parent is selected
                 return selectedFamilyIds.includes(c.parentId);
             });
         }
 
-        const data = displayCodes.map(code => {
-            const totalCount = project.selections.filter(s => s.codeId === code.id).length;
-            return {
-                name: code.name,
-                count: totalCount,
-                fill: code.color,
-                id: code.id
-            };
-        })
-            .filter(item => item.count > 0)
-            .sort((a, b) => b.count - a.count);
+        // Prepare Data
+        let data: any[] = [];
+        let selections: any[] = [];
+        let users: string[] = [];
 
-        // Filter selections for the segment view
-        const selections = project.selections.filter(s => displayCodes.some(c => c.id === s.codeId));
+        if (compareMode && cloudProjectId) {
+            // Comparison Logic
+            // We need a list of all users to display.
+            // Include myself (project.selections) + collaboratorData
 
-        return { chartData: data, filteredCodes: displayCodes, allSelections: selections };
-    }, [project.codes, project.selections, selectedFamilyIds]);
+            // Combine all datasets
+            // Check if my data already exists in collaboratorData
+            const myDataExists = collaboratorData.some(c => c.userId === currentUserId);
+
+            let allUsers: CollaboratorData[];
+            if (myDataExists) {
+                // My data is already in the fetched results; update it with my current local state
+                allUsers = collaboratorData.map(c => {
+                    if (c.userId === currentUserId) {
+                        return {
+                            ...c,
+                            displayName: 'Me (Current)',
+                            selections: project.selections,
+                        };
+                    }
+                    return c;
+                });
+            } else {
+                // Append my current state manually
+                const myData: CollaboratorData = {
+                    userId: currentUserId || 'me',
+                    displayName: 'Me (Current)',
+                    email: '',
+                    selections: project.selections,
+                    transcriptMemos: {},
+                    personalMemo: ''
+                };
+                allUsers = [myData, ...collaboratorData.filter(c => c.userId !== currentUserId)];
+            }
+
+            // Filter by selectedUsers
+            const activeUsers = selectedUsers.length > 0
+                ? allUsers.filter(u => selectedUsers.includes(u.userId))
+                : allUsers;
+
+            users = activeUsers.map(u => u.displayName);
+
+            // Build Chart Data
+            // Structure: { name: 'Code A', 'User A': 10, 'User B': 5, ... }
+            data = displayCodes.map(code => {
+                const row: any = { name: code.name, id: code.id, fill: code.color };
+                activeUsers.forEach(u => {
+                    const count = u.selections.filter(s => s.codeId === code.id).length;
+                    row[u.displayName] = count;
+                });
+                return row;
+            }).filter(item => Object.keys(item).length > 3 && Object.values(item).some(v => typeof v === 'number' && v > 0));
+
+            // Build Selections List
+            activeUsers.forEach(u => {
+                const userSelections = u.selections.map(s => ({ ...s, userName: u.displayName }));
+                selections.push(...userSelections);
+            });
+            selections = selections.filter(s => displayCodes.some(c => c.id === s.codeId));
+
+        } else {
+            // Standard Single View
+            data = displayCodes.map(code => {
+                const totalCount = project.selections.filter(s => s.codeId === code.id).length;
+                return {
+                    name: code.name,
+                    count: totalCount,
+                    fill: code.color,
+                    id: code.id
+                };
+            })
+                .filter(item => item.count > 0)
+                .sort((a, b) => b.count - a.count);
+
+            selections = project.selections.filter(s => displayCodes.some(c => c.id === s.codeId));
+        }
+
+        return { chartData: data, filteredCodes: displayCodes, allSelections: selections, userKeys: users };
+    }, [project, selectedFamilyIds, compareMode, collaboratorData, selectedUsers]);
 
     const rootCodes = project.codes.filter(c => !c.parentId);
 
     const toggleFamily = (id: string) => {
         setSelectedFamilyIds(prev =>
-            prev.includes(id)
-                ? prev.filter(p => p !== id)
-                : [...prev, id]
+            prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]
         );
     };
 
-    // Co-occurrence matrix data
+    // Co-occurrence (simplified: relies on 'project' only for now, hard to matrix multiple users at once)
     const cooccurrenceMatrix = useMemo(() => {
+        if (compareMode) return { matrix: {}, codes: [] }; // Not supported in compare yet
+
         const usedCodes = project.codes.filter(c => project.selections.some(s => s.codeId === c.id));
         const matrix: Record<string, Record<string, number>> = {};
+        // ... (existing logic)
+        usedCodes.forEach(a => { matrix[a.id] = {}; usedCodes.forEach(b => { matrix[a.id][b.id] = 0; }); });
 
-        usedCodes.forEach(a => {
-            matrix[a.id] = {};
-            usedCodes.forEach(b => {
-                matrix[a.id][b.id] = 0;
-            });
-        });
-
-        // Group selections by transcript
         const byTranscript: Record<string, typeof project.selections> = {};
         project.selections.forEach(s => {
             if (!byTranscript[s.transcriptId]) byTranscript[s.transcriptId] = [];
             byTranscript[s.transcriptId].push(s);
         });
 
-        // For each transcript, check overlapping/near selections
         Object.values(byTranscript).forEach(sels => {
             for (let i = 0; i < sels.length; i++) {
                 for (let j = i + 1; j < sels.length; j++) {
                     const a = sels[i];
                     const b = sels[j];
                     if (a.codeId === b.codeId) continue;
-                    // Co-occurrence: same paragraph proximity (within 200 chars)
-                    const overlap = Math.abs(a.startIndex - b.startIndex) < 200;
-                    if (overlap) {
-                        matrix[a.codeId] = matrix[a.codeId] || {};
-                        matrix[b.codeId] = matrix[b.codeId] || {};
+                    if (Math.abs(a.startIndex - b.startIndex) < 200) {
                         matrix[a.codeId][b.codeId] = (matrix[a.codeId]?.[b.codeId] || 0) + 1;
                         matrix[b.codeId][a.codeId] = (matrix[b.codeId]?.[a.codeId] || 0) + 1;
                     }
                 }
             }
         });
-
         return { matrix, codes: usedCodes };
-    }, [project.codes, project.selections]);
+    }, [project.codes, project.selections, compareMode]);
 
     return (
         <div className="absolute inset-0 z-20 bg-[var(--bg-main)]/90 flex items-center justify-center p-6 backdrop-blur-sm animate-in fade-in duration-200">
@@ -106,31 +196,26 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
                         </h2>
                     </div>
                     <div className="flex items-center space-x-3">
+                        {/* Compare Toggle */}
+                        {cloudProjectId && (
+                            <button
+                                onClick={() => setCompareMode(!compareMode)}
+                                className={`flex items-center gap-2 px-3 py-1.5 text-sm font-bold rounded-md transition-all border ${compareMode ? 'bg-indigo-100 text-indigo-700 border-indigo-200' : 'bg-[var(--bg-main)] text-[var(--text-muted)] border-transparent'}`}
+                            >
+                                <Users size={16} /> Compare
+                            </button>
+                        )}
+
                         <div className="flex bg-[var(--bg-main)] rounded-lg p-1">
-                            <button
-                                onClick={() => setViewMode('chart')}
-                                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${viewMode === 'chart' ? 'bg-[var(--bg-panel)] shadow text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
-                            >
-                                Chart
-                            </button>
-                            <button
-                                onClick={() => setViewMode('table')}
-                                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${viewMode === 'table' ? 'bg-[var(--bg-panel)] shadow text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
-                            >
-                                Matrix
-                            </button>
-                            <button
-                                onClick={() => setViewMode('segments')}
-                                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${viewMode === 'segments' ? 'bg-[var(--bg-panel)] shadow text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
-                            >
-                                Segments
-                            </button>
-                            <button
-                                onClick={() => setViewMode('cooccurrence')}
-                                className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${viewMode === 'cooccurrence' ? 'bg-[var(--bg-panel)] shadow text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
-                            >
-                                Co-occurrence
-                            </button>
+                            {['chart', 'table', 'segments', 'cooccurrence'].map(mode => (
+                                <button
+                                    key={mode}
+                                    onClick={() => setViewMode(mode as any)}
+                                    className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all capitalize ${viewMode === mode ? 'bg-[var(--bg-panel)] shadow text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
+                                >
+                                    {mode}
+                                </button>
+                            ))}
                         </div>
                         <button
                             onClick={onExport}
@@ -151,7 +236,8 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
                         <div className="flex items-center mb-4 text-[var(--text-muted)] font-bold text-sm uppercase tracking-wider">
                             <Filter size={14} className="mr-2" /> Filter Codes
                         </div>
-                        <div className="space-y-1">
+                        {/* Code Filters */}
+                        <div className="space-y-1 mb-6">
                             <button
                                 onClick={() => setSelectedFamilyIds([])}
                                 className={`w-full text-left px-3 py-2 rounded-md text-sm font-medium transition-colors border ${selectedFamilyIds.length === 0 ? 'bg-[var(--bg-panel)] border-[var(--accent)] text-[var(--accent)]' : 'border-transparent hover:bg-[var(--bg-panel)] text-[var(--text-muted)]'}`}
@@ -168,22 +254,66 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
                                         className={`w-full text-left px-3 py-2 rounded-md text-sm transition-colors flex items-center justify-between border ${isSelected ? 'bg-[var(--bg-panel)] border-[var(--border)] text-[var(--text-main)] shadow-sm' : 'border-transparent hover:bg-[var(--bg-panel)] text-[var(--text-muted)]'}`}
                                     >
                                         <div className="flex items-center">
-                                            <div className={`w-4 h-4 rounded border mr-3 flex items-center justify-center transition-colors ${isSelected ? 'bg-[var(--accent)] border-[var(--accent)]' : 'border-[var(--text-muted)]'}`}>
-                                                {isSelected && <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>}
-                                            </div>
-                                            <span className="flex items-center">
-                                                <span className="w-2 h-2 rounded-full mr-2" style={{ backgroundColor: rootCode.color }}></span>
-                                                {rootCode.name}
-                                            </span>
+                                            <span className="w-2 h-2 rounded-full mr-2" style={{ backgroundColor: rootCode.color }}></span>
+                                            {rootCode.name}
                                         </div>
                                     </button>
                                 );
                             })}
                         </div>
+
+                        {/* User Filters (Compare Mode) */}
+                        {compareMode && collaboratorData.length > 0 && (
+                            <div>
+                                <div className="flex items-center mb-2 text-[var(--text-muted)] font-bold text-sm uppercase tracking-wider">
+                                    <Users size={14} className="mr-2" /> Users
+                                </div>
+                                <div className="space-y-1">
+                                    {[{ userId: currentUserId || 'me', displayName: 'Me (Current)' }, ...collaboratorData].map(u => (
+                                        <label key={u.userId} className="flex items-center gap-2 px-3 py-2 hover:bg-[var(--bg-panel)] rounded cursor-pointer">
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedUsers.length === 0 || selectedUsers.includes(u.userId)}
+                                                onChange={(e) => {
+                                                    const checked = e.target.checked;
+                                                    setSelectedUsers(prev => {
+                                                        const wasEmpty = prev.length === 0;
+                                                        // If it was empty (all selected implicitly), and we uncheck one, we must explicitly select ONLY the others.
+                                                        // This logic is tricky. Let's simplify:
+                                                        // If currently empty, checking one means only that one is selected?
+                                                        // Or start with empty = all.
+
+                                                        // Let's go with: Empty list = All.
+                                                        // If I verify the list is empty and I click one, I probably want to select JUST that one? No, checkboxes usually imply "add/remove".
+
+                                                        // Simpler: Just toggle.
+                                                        if (wasEmpty) {
+                                                            // If all were shown, and we unclick one? No, let's explicitly select all others?
+                                                            // Let's initialize selectedUsers with everyone when enter mode?
+                                                            return [u.userId];
+                                                        }
+
+                                                        if (checked) return [...prev, u.userId];
+                                                        return prev.filter(id => id !== u.userId);
+                                                    });
+                                                }}
+                                                className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                                            />
+                                            <span className="text-sm truncate">{u.displayName}</span>
+                                        </label>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
 
                     <div className="flex-1 p-6 overflow-hidden flex flex-col bg-[var(--bg-panel)]">
-                        {viewMode === 'chart' && (
+                        {loadingCollab ? (
+                            <div className="flex-1 flex items-center justify-center">
+                                <RefreshCw className="animate-spin text-[var(--accent)] mb-2" size={32} />
+                                <span className="ml-2 text-sm text-[var(--text-muted)]">Loading comparison data...</span>
+                            </div>
+                        ) : viewMode === 'chart' ? (
                             <div className="w-full h-full min-h-[300px]">
                                 <ResponsiveContainer width="100%" height="100%">
                                     <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
@@ -192,71 +322,87 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
                                         <YAxis tick={{ fill: 'var(--text-muted)' }} />
                                         <Tooltip
                                             contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', backgroundColor: 'var(--bg-panel)', color: 'var(--text-main)' }}
-                                            cursor={{ fill: 'var(--bg-main)' }}
+                                            cursor={{ fill: 'var(--bg-main)', opacity: 0.1 }}
+                                            labelStyle={{ fontWeight: 'bold', marginBottom: '5px' }}
+                                            formatter={(value: number) => [`${value} selections`, '']}
                                         />
-                                        <Bar dataKey="count" fill="var(--accent)" name="Frequency" radius={[4, 4, 0, 0]} />
+                                        <Legend />
+                                        {compareMode ? (
+                                            userKeys.map((userName, i) => (
+                                                <Bar key={userName} dataKey={userName} fill={`hsl(${i * 60 + 200}, 70%, 60%)`} radius={[4, 4, 0, 0]} name={userName} />
+                                            ))
+                                        ) : (
+                                            <Bar dataKey="count" fill="var(--accent)" name="Frequency" radius={[4, 4, 0, 0]} />
+                                        )}
                                     </BarChart>
                                 </ResponsiveContainer>
                             </div>
-                        )}
-
-                        {viewMode === 'table' && (
+                        ) : viewMode === 'table' ? (
                             <div className="flex-1 overflow-auto border border-[var(--border)] rounded-lg">
-                                <table className="w-full border-collapse text-sm text-left">
-                                    <thead className="bg-[var(--bg-main)] text-[var(--text-main)] font-bold sticky top-0 shadow-sm z-10">
-                                        <tr>
-                                            <th className="p-3 border-b border-r border-[var(--border)] min-w-[200px] bg-[var(--bg-main)]">Document</th>
-                                            {filteredCodes.map(code => (
-                                                <th key={code.id} className="p-3 border-b border-[var(--border)] min-w-[100px] bg-[var(--bg-main)]">
-                                                    <div className="flex items-center space-x-1">
-                                                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: code.color }}></span>
-                                                        <span className="truncate max-w-[120px]" title={code.name}>{code.name}</span>
-                                                    </div>
-                                                </th>
-                                            ))}
-                                            <th className="p-3 border-b border-[var(--border)] bg-[var(--bg-main)]">Total</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {project.transcripts.map(t => {
-                                            let docTotal = 0;
-                                            return (
-                                                <tr key={t.id} className="hover:bg-[var(--bg-main)] border-b border-[var(--border)] last:border-0">
-                                                    <td className="p-3 border-r border-[var(--border)] font-medium text-[var(--text-main)] bg-[var(--bg-panel)] sticky left-0">{t.name}</td>
-                                                    {filteredCodes.map(code => {
-                                                        const count = project.selections.filter(s => s.transcriptId === t.id && s.codeId === code.id).length;
-                                                        docTotal += count;
-                                                        return (
-                                                            <td key={code.id} className={`p-3 border-r border-[var(--border)] text-center transition-colors ${count > 0 ? 'font-bold text-[var(--accent)]' : 'text-[var(--text-muted)]'}`}>
-                                                                {count > 0 ? count : '-'}
-                                                            </td>
-                                                        );
-                                                    })}
-                                                    <td className="p-3 font-bold text-[var(--text-main)] text-center bg-[var(--bg-panel)]">{docTotal}</td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
+                                {/* Simplified table for now, needs overhaul for comparison */}
+                                {compareMode ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-[var(--text-muted)] p-8">
+                                        <div className="text-lg font-semibold mb-2">Matrix View not fully optimized</div>
+                                        <p className="text-sm opacity-70">Please switch to Chart view for comparison.</p>
+                                    </div>
+                                ) : (
+                                    <table className="w-full border-collapse text-sm text-left">
+                                        {/* ... Existing Single User Table ... */}
+                                        <thead className="bg-[var(--bg-main)] text-[var(--text-main)] font-bold sticky top-0 shadow-sm z-10">
+                                            <tr>
+                                                <th className="p-3 border-b border-r border-[var(--border)] min-w-[200px] bg-[var(--bg-main)]">Document</th>
+                                                {filteredCodes.map(code => (
+                                                    <th key={code.id} className="p-3 border-b border-[var(--border)] min-w-[100px] bg-[var(--bg-main)]">
+                                                        <div className="flex items-center space-x-1">
+                                                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: code.color }}></span>
+                                                            <span className="truncate max-w-[120px]" title={code.name}>{code.name}</span>
+                                                        </div>
+                                                    </th>
+                                                ))}
+                                                <th className="p-3 border-b border-[var(--border)] bg-[var(--bg-main)]">Total</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {project.transcripts.map(t => {
+                                                let docTotal = 0;
+                                                return (
+                                                    <tr key={t.id} className="hover:bg-[var(--bg-main)] border-b border-[var(--border)] last:border-0">
+                                                        <td className="p-3 border-r border-[var(--border)] font-medium text-[var(--text-main)] bg-[var(--bg-panel)] sticky left-0">{t.name}</td>
+                                                        {filteredCodes.map(code => {
+                                                            const count = project.selections.filter(s => s.transcriptId === t.id && s.codeId === code.id).length;
+                                                            docTotal += count;
+                                                            return (
+                                                                <td key={code.id} className={`p-3 border-r border-[var(--border)] text-center transition-colors ${count > 0 ? 'font-bold text-[var(--accent)]' : 'text-[var(--text-muted)]'}`}>
+                                                                    {count > 0 ? count : '-'}
+                                                                </td>
+                                                            );
+                                                        })}
+                                                        <td className="p-3 font-bold text-[var(--text-main)] text-center bg-[var(--bg-panel)]">{docTotal}</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                )}
                             </div>
-                        )}
-
-                        {viewMode === 'segments' && (
+                        ) : viewMode === 'segments' ? (
                             <div className="flex-1 overflow-auto border border-[var(--border)] rounded-lg">
                                 <table className="w-full border-collapse text-sm text-left">
                                     <thead className="bg-[var(--bg-main)] text-[var(--text-main)] font-bold sticky top-0 shadow-sm z-10">
                                         <tr>
+                                            {compareMode && <th className="p-3 border-b border-[var(--border)] w-32 bg-[var(--bg-main)]">User</th>}
                                             <th className="p-3 border-b border-[var(--border)] w-48 bg-[var(--bg-main)]">Code</th>
                                             <th className="p-3 border-b border-[var(--border)] w-48 bg-[var(--bg-main)]">Document</th>
                                             <th className="p-3 border-b border-[var(--border)] bg-[var(--bg-main)]">Segment Text</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {allSelections.map(sel => {
+                                        {allSelections.map((sel, i) => {
                                             const code = project.codes.find(c => c.id === sel.codeId);
                                             const transcript = project.transcripts.find(t => t.id === sel.transcriptId);
                                             return (
-                                                <tr key={sel.id} className="hover:bg-[var(--bg-main)] border-b border-[var(--border)] last:border-0">
+                                                <tr key={`${sel.id}-${i}`} className="hover:bg-[var(--bg-main)] border-b border-[var(--border)] last:border-0">
+                                                    {compareMode && <td className="p-3 border-r border-[var(--border)] font-bold text-xs">{sel.userName}</td>}
                                                     <td className="p-3 border-r border-[var(--border)] font-medium">
                                                         <div className="flex items-center gap-2">
                                                             <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: code?.color }}></span>
@@ -271,63 +417,10 @@ export const AnalysisView: React.FC<Props> = ({ project, onClose, onExport }) =>
                                     </tbody>
                                 </table>
                             </div>
-                        )}
-
-                        {viewMode === 'cooccurrence' && (
-                            <div className="flex-1 overflow-auto border border-[var(--border)] rounded-lg">
-                                {cooccurrenceMatrix.codes.length === 0 ? (
-                                    <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-                                        <p>No coded segments yet. Apply codes to transcripts to see co-occurrence patterns.</p>
-                                    </div>
-                                ) : (
-                                    <table className="w-full border-collapse text-sm">
-                                        <thead className="bg-[var(--bg-main)] sticky top-0 z-10">
-                                            <tr>
-                                                <th className="p-3 border-b border-r border-[var(--border)] min-w-[160px] bg-[var(--bg-main)] text-left text-[var(--text-muted)] text-xs font-bold uppercase">
-                                                    Co-occurrence
-                                                </th>
-                                                {cooccurrenceMatrix.codes.map(code => (
-                                                    <th key={code.id} className="p-2 border-b border-[var(--border)] bg-[var(--bg-main)] min-w-[80px]">
-                                                        <div className="flex items-center gap-1 justify-center">
-                                                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: code.color }} />
-                                                            <span className="text-xs truncate max-w-[70px]" title={code.name}>{code.name}</span>
-                                                        </div>
-                                                    </th>
-                                                ))}
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {cooccurrenceMatrix.codes.map(rowCode => (
-                                                <tr key={rowCode.id} className="border-b border-[var(--border)]">
-                                                    <td className="p-3 border-r border-[var(--border)] font-medium text-[var(--text-main)] bg-[var(--bg-panel)] sticky left-0">
-                                                        <div className="flex items-center gap-2">
-                                                            <span className="w-2 h-2 rounded-full" style={{ backgroundColor: rowCode.color }} />
-                                                            {rowCode.name}
-                                                        </div>
-                                                    </td>
-                                                    {cooccurrenceMatrix.codes.map(colCode => {
-                                                        const count = cooccurrenceMatrix.matrix[rowCode.id]?.[colCode.id] || 0;
-                                                        const isDiagonal = rowCode.id === colCode.id;
-                                                        const maxCount = Math.max(1, ...Object.values(cooccurrenceMatrix.matrix).flatMap(r => Object.values(r)));
-                                                        const intensity = count / maxCount;
-                                                        return (
-                                                            <td
-                                                                key={colCode.id}
-                                                                className={`p-3 text-center border-r border-[var(--border)] transition-colors ${isDiagonal ? 'bg-[var(--bg-main)]' : ''}`}
-                                                                style={!isDiagonal && count > 0 ? {
-                                                                    backgroundColor: `rgba(99, 102, 241, ${0.1 + intensity * 0.5})`,
-                                                                    color: intensity > 0.5 ? 'white' : 'var(--text-main)'
-                                                                } : {}}
-                                                            >
-                                                                {isDiagonal ? '—' : count > 0 ? <strong>{count}</strong> : <span className="text-[var(--text-muted)]">0</span>}
-                                                            </td>
-                                                        );
-                                                    })}
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                )}
+                        ) : (
+                            <div className="flex flex-col items-center justify-center h-full text-[var(--text-muted)] p-8">
+                                <div className="text-lg font-semibold mb-2">View not supported</div>
+                                <p className="text-sm opacity-70">This view is currently unavailable in comparison mode.</p>
                             </div>
                         )}
                     </div>
