@@ -716,6 +716,8 @@ export const Editor = memo<EditorProps>(({
     if (!contentRef.current) return;
 
     const lines = contentRef.current.querySelectorAll('.transcript-line');
+    // Track which annotations have already been displayed (to prevent duplicates on multi-line selections)
+    const displayedAnnotationSelectionIds = new Set<string>();
 
     lines.forEach(line => {
       const existing = line.querySelector('.line-codes-gutter');
@@ -737,7 +739,10 @@ export const Editor = memo<EditorProps>(({
         // Check if this selection has an annotation
         if (selId) {
           const sel = selections.find(s => s.id === selId);
-          if (sel?.annotation && !annotationsForLine.some(a => a.annotation === sel.annotation)) { // Check for duplicates
+          if (sel?.annotation &&
+            !annotationsForLine.some(a => a.annotation === sel.annotation) && // Avoid duplicates on same line
+            !displayedAnnotationSelectionIds.has(selId)) { // Avoid duplicates across lines (show only on first line)
+
             const codeId = el.dataset.codeId;
             const code = visibleCodes.find(c => c.id === codeId);
             if (code) {
@@ -746,6 +751,7 @@ export const Editor = memo<EditorProps>(({
                 codeColor: code.color,
                 annotation: sel.annotation
               });
+              displayedAnnotationSelectionIds.add(selId);
             }
           }
         }

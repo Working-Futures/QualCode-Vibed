@@ -20,6 +20,8 @@ import {
   getUserProjectData,
   saveTranscript,
   saveCodes,
+  saveSharedCode,
+  deleteSharedCode,
   saveUserProjectData,
   updateCloudProject,
   deleteTranscript as deleteCloudTranscript,
@@ -242,11 +244,16 @@ export default function App() {
   useEffect(() => {
     if (!cloudProject?.id) return;
     const unsub = subscribeToCodes(cloudProject.id, (sharedCodes) => {
-      // Merge shared codes with user's local personal codes
+      // Merge shared codes with user's local personal codes AND draft suggested codes
       setProject(prev => {
         if (!prev) return null;
-        const personalCodes = prev.codes.filter(c => c.type === 'personal');
-        return { ...prev, codes: [...sharedCodes, ...personalCodes] };
+        // Keep personal codes and draft suggested codes that aren't in shared list
+        const sharedIds = new Set(sharedCodes.map(c => c.id));
+        const localCodes = prev.codes.filter(c =>
+          c.type === 'personal' ||
+          (c.type === 'suggested' && !sharedIds.has(c.id)) // Keep drafts not yet published
+        );
+        return { ...prev, codes: [...sharedCodes, ...localCodes] };
       });
     });
     return () => unsub();
@@ -416,8 +423,11 @@ export default function App() {
         if (t.memo) transcriptMemos[t.id] = t.memo;
       });
 
-      // Separate personal codes for per-user storage
-      const personalCodes = currentProject.codes.filter(c => c.type === 'personal' && c.createdBy === currentUser?.uid);
+      // Separate personal codes (and draft suggested codes) for per-user storage
+      const personalCodes = currentProject.codes.filter(c =>
+        ((c.type === 'personal') || (c.type === 'suggested' && c.status === 'draft')) &&
+        c.createdBy === currentUser?.uid
+      );
 
       console.log('[saveToCloud] Saving user project data...');
       await saveUserProjectData(currentCloudProject.id, currentUser.uid, {
@@ -547,10 +557,13 @@ export default function App() {
       ]);
       console.log(`[openCloudProject] Step 1 ✓: ${transcripts.length} transcripts, ${sharedCodes.length} shared codes, ${userData.selections.length} selections`);
 
-      // Merge shared codes with user's personal codes
-      const personalCodes = (userData.personalCodes || []).filter(c => c.type === 'personal');
-      const codes = [...sharedCodes, ...personalCodes];
-      console.log(`[openCloudProject] Merged codes: ${sharedCodes.length} shared + ${personalCodes.length} personal = ${codes.length} total`);
+      // Merge shared codes with user's personal codes (and drafts)
+      const userCodes = (userData.personalCodes || []).filter(c => c.type === 'personal' || c.type === 'suggested');
+      // Deduplicate: If a user code is already in sharedCodes (e.g. it was published), prefer sharedCodes
+      const sharedIds = new Set(sharedCodes.map(c => c.id));
+      const uniqueUserCodes = userCodes.filter(c => !sharedIds.has(c.id));
+      const codes = [...sharedCodes, ...uniqueUserCodes];
+      console.log(`[openCloudProject] Merged codes: ${sharedCodes.length} shared + ${uniqueUserCodes.length} personal/drafts = ${codes.length} total`);
 
       // Convert cloud transcripts to local format
       console.log('[openCloudProject] Step 2: Restoring highlights on transcripts...');
@@ -801,12 +814,17 @@ export default function App() {
       parentId: parent?.id,
       type: type,
       createdBy: user?.uid,
-      suggestedBy: type === 'suggested' ? user?.uid : undefined
+      suggestedBy: type === 'suggested' ? user?.uid : undefined,
+      status: type === 'suggested' ? 'draft' : undefined // Draft codes are private until submitted
     };
 
     handleProjectUpdate({ ...project, codes: [...project.codes, newCode] });
     setActiveCodeId(newCode.id);
 
+    // Sync to cloud immediately if shared (but not drafts)
+    if (cloudProject && (newCode.type === 'master')) {
+      saveSharedCode(cloudProject.id, newCode).catch(console.error);
+    }
     // Log code creation history & activity
     if (cloudProject && user) {
       logCodeHistory(cloudProject.id, {
@@ -871,6 +889,9 @@ export default function App() {
   };
 
   const handleViewCollaborator = async (userId: string, userName: string) => {
+    // Prevent re-entering view mode if already viewing that user (though unlikely via UI)
+    if (viewingAsUser?.id === userId) return;
+
     console.log(`[viewCollaborator] ▶ Starting view for user="${userName}" (${userId})`);
     if (!cloudProject || !project) {
       console.warn('[viewCollaborator] Aborted: no cloudProject or project loaded');
@@ -879,7 +900,7 @@ export default function App() {
 
     // Step 0: Auto-save current user's data before switching to view mode
     // This prevents data loss (memos, selections) when the project state is replaced
-    if (user) {
+    if (user && !viewingAsUser) {
       console.log('[viewCollaborator] Step 0: Auto-saving current user data before view switch...');
       try {
         await saveToCloud(project, cloudProject, user);
@@ -894,34 +915,30 @@ export default function App() {
     console.log('[viewCollaborator] Set viewingAsUser and disabled editing');
 
     try {
-      // Step 1: Fetch the collaborator's user data (selections, memos)
+      // Step 1: Fetch the collaborator's user data (selections, memos, personal codes)
       console.log(`[viewCollaborator] Step 1: Fetching user project data for ${userId}...`);
       const data = await getUserProjectData(cloudProject.id, userId);
       console.log(`[viewCollaborator] Step 1 ✓: Got ${data.selections.length} selections, ${Object.keys(data.transcriptMemos).length} transcript memos, personalMemo=${!!data.personalMemo}`);
 
-      // Step 2: Fetch clean transcript content from Firestore (no highlights baked in)
-      console.log('[viewCollaborator] Step 2: Fetching clean transcripts from Firestore...');
-      const cleanTranscripts = await getTranscripts(cloudProject.id);
-      console.log(`[viewCollaborator] Step 2 ✓: Got ${cleanTranscripts.length} clean transcripts`);
+      // Step 2: Prepare the codes for the view (Shared Codes + Collaborator's Personal Codes)
+      // We filter out the *current* user's personal codes from the project
+      // Note: project.codes currently contains (Shared + Current User Personal)
+      const sharedCodes = project.codes.filter(c => c.type === 'master' || c.type === 'suggested');
+      const collaboratorPersonalCodes = (data.personalCodes || []).filter(c => c.type === 'personal');
+      const viewCodes = [...sharedCodes, ...collaboratorPersonalCodes];
+      console.log(`[viewCollaborator] Step 2: Merged codes (Shared: ${sharedCodes.length} + Collab Personal: ${collaboratorPersonalCodes.length})`);
 
-      // Step 3: Rebuild transcripts with the collaborator's highlights applied
-      console.log('[viewCollaborator] Step 3: Restoring highlights from collaborator selections...');
+      // Step 3: Hydrate transcripts with collaborator's selections using their codes
+      console.log('[viewCollaborator] Step 3: Restoring highlights on transcripts...');
       const updatedTranscripts = project.transcripts.map(t => {
-        // Find the clean version from Firestore
-        const cleanVersion = cleanTranscripts.find(ct => ct.id === t.id);
-        const cleanContent = cleanVersion ? cleanVersion.content : stripHighlights(t.content);
-
-        // Get this user's selections for this transcript
-        const userSelectionsForTranscript = data.selections.filter(s => s.transcriptId === t.id);
-
-        // Apply highlights from collaborator's selections onto clean content
-        const highlightedContent = restoreHighlights(cleanContent, userSelectionsForTranscript, project.codes);
-
-        console.log(`[viewCollaborator]   Transcript "${t.name}": ${userSelectionsForTranscript.length} selections, content restored`);
+        // We use stripHighlights first to ensure clean slate if needed, though t.content might have current user's highlights?
+        // Actually t.content in project state has highlights. We must strip them first or use clean content?
+        // It is safer to strip highlights first.
+        const cleanContent = stripHighlights(t.content);
 
         return {
           ...t,
-          content: highlightedContent,
+          content: restoreHighlights(cleanContent, data.selections.filter(s => s.transcriptId === t.id), viewCodes),
           memo: data.transcriptMemos[t.id] || ''
         };
       });
@@ -930,6 +947,7 @@ export default function App() {
       console.log('[viewCollaborator] Step 4: Updating project state with collaborator view...');
       setProject({
         ...project,
+        codes: viewCodes, // Update codes to show collaborator's personal codes in CodeTree
         selections: data.selections,
         transcripts: updatedTranscripts,
         projectMemo: data.personalMemo || ''
@@ -958,44 +976,40 @@ export default function App() {
       // Step 1: Fetch the current user's data
       console.log(`[exitViewMode] Step 1: Fetching own user project data (${user.uid})...`);
       const data = await getUserProjectData(cloudProject.id, user.uid);
-      console.log(`[exitViewMode] Step 1 ✓: Got ${data.selections.length} selections, ${Object.keys(data.transcriptMemos).length} transcript memos`);
 
-      // Step 2: Fetch clean transcript content from Firestore
-      console.log('[exitViewMode] Step 2: Fetching clean transcripts from Firestore...');
-      const cleanTranscripts = await getTranscripts(cloudProject.id);
-      console.log(`[exitViewMode] Step 2 ✓: Got ${cleanTranscripts.length} clean transcripts`);
+      // Step 2: Restore original codes (Shared + My Personal)
+      console.log(`[exitViewMode] Step 2: Restoring my codes...`);
+      // We assume project.codes currently has (Shared + Collab Personal).
+      // We need to rebuild (Shared + My Personal).
+      const sharedCodes = project.codes.filter(c => c.type === 'master' || c.type === 'suggested');
+      // getUserProjectData returns personalCodes.
+      const myPersonalCodes = (data.personalCodes || []).filter(c => c.type === 'personal');
+      const restoredCodes = [...sharedCodes, ...myPersonalCodes];
 
-      // Step 3: Rebuild transcripts with the current user's highlights
-      console.log('[exitViewMode] Step 3: Restoring highlights from own selections...');
-      const updatedTranscripts = project.transcripts.map(t => {
-        const cleanVersion = cleanTranscripts.find(ct => ct.id === t.id);
-        const cleanContent = cleanVersion ? cleanVersion.content : stripHighlights(t.content);
-
-        const mySelectionsForTranscript = data.selections.filter(s => s.transcriptId === t.id);
-        const highlightedContent = restoreHighlights(cleanContent, mySelectionsForTranscript, project.codes);
-
-        console.log(`[exitViewMode]   Transcript "${t.name}": ${mySelectionsForTranscript.length} selections restored`);
-
+      // Step 3: Hydrate transcripts with own selections
+      console.log(`[exitViewMode] Step 3: Restoring highlights...`);
+      const restoredTranscripts = project.transcripts.map(t => {
+        const cleanContent = stripHighlights(t.content);
         return {
           ...t,
-          content: highlightedContent,
+          content: restoreHighlights(cleanContent, data.selections.filter(s => s.transcriptId === t.id), restoredCodes),
           memo: data.transcriptMemos[t.id] || ''
         };
       });
 
       // Step 4: Update project state
-      console.log('[exitViewMode] Step 4: Updating project state with own data...');
       setProject({
         ...project,
+        codes: restoredCodes,
         selections: data.selections,
-        transcripts: updatedTranscripts,
+        transcripts: restoredTranscripts,
         projectMemo: data.personalMemo || ''
       });
-      console.log('[exitViewMode] ✅ Successfully restored own view');
+      console.log('[exitViewMode] ✅ Successfully exited view mode');
 
     } catch (e) {
-      console.error('[exitViewMode] ❌ Error restoring own data:', e);
-      alert("Error restoring your data. Please reload the project.");
+      console.error('[exitViewMode] ❌ Error restoring user data:', e);
+      alert("Error returning to your view. Please refresh.");
     }
   };
 
@@ -1254,19 +1268,52 @@ export default function App() {
                   .concat(newCode);
                 handleProjectUpdate({ ...project, codes: updatedCodes });
               }
+              // Sync to Cloud
+              saveSharedCode(cloudProject.id, newCode).catch(console.error);
             } else if (proposal.action === 'edit' && proposal.targetCodeId && proposal.proposedData) {
               handleProjectUpdate({
                 ...project,
                 codes: project.codes.map(c => c.id === proposal.targetCodeId ? { ...c, ...proposal.proposedData } : c)
               });
+              saveSharedCode(cloudProject.id, { id: proposal.targetCodeId, ...proposal.proposedData } as any).catch(console.error);
             } else if (proposal.action === 'delete' && proposal.deleteCodeId) {
               handleProjectUpdate({
                 ...project,
                 codes: project.codes.filter(c => c.id !== proposal.deleteCodeId)
               });
+              deleteSharedCode(cloudProject.id, proposal.deleteCodeId).catch(console.error);
             } else if (proposal.action === 'merge' && proposal.mergeSourceId && proposal.mergeTargetId) {
               handleProjectUpdate(mergeCodesInProject(project, proposal.mergeSourceId, proposal.mergeTargetId));
+              deleteSharedCode(cloudProject.id, proposal.mergeSourceId).catch(console.error);
             }
+
+            // Log version control event
+            logVersionControlEvent(cloudProject.id, {
+              id: crypto.randomUUID(),
+              projectId: cloudProject.id,
+              eventType: proposal.action === 'add' ? 'code_create' :
+                proposal.action === 'edit' ? 'code_edit' :
+                  proposal.action === 'delete' ? 'code_delete' :
+                    proposal.action === 'merge' ? 'code_merge' : 'proposal',
+              userId: user.uid,
+              userName: user.displayName || 'Admin',
+              timestamp: Date.now(),
+              description: `Accepted ${proposal.action} proposal from ${proposal.proposerName}`
+            }).catch(console.error);
+
+            // Notify everyone about the codebook change
+            sendNotification(cloudProject.id, {
+              id: crypto.randomUUID(),
+              projectId: cloudProject.id,
+              type: 'codebook_change',
+              title: 'Codebook Updated',
+              message: `${user.displayName || 'Admin'} applied a ${proposal.action} change to the master codebook (proposed by ${proposal.proposerName}).`,
+              timestamp: Date.now(),
+              fromUserId: user.uid,
+              fromUserName: user.displayName || 'Admin',
+              targetUserIds: [],
+              readBy: [user.uid]
+            }).catch(console.error);
           }}
           onUpdateCodes={(newCodes) => handleProjectUpdate({ ...project, codes: newCodes })}
           onRestoreSnapshot={(snapshot) => {
@@ -1291,30 +1338,7 @@ export default function App() {
           }}
         />
       )}
-      {/* View Mode Banner */}
-      {viewingAsUser && (
-        <div className="bg-indigo-600 text-white px-4 py-2 text-sm font-bold flex justify-between items-center shadow-md z-40 shrink-0">
-          <div className="flex items-center gap-2">
-            <Eye size={16} />
-            Viewing as {viewingAsUser.name} (Read Only)
-          </div>
-          <button
-            onClick={handleExitViewMode}
-            className="bg-white text-indigo-600 px-3 py-1 rounded text-xs hover:bg-indigo-50"
-          >
-            Exit View
-          </button>
-        </div>
-      )}
 
-      {/* Sticky Notes Overlay */}
-      {/* Sticky Notes Overlay - Only show in non-editor views (Editor has its own embedded board) */}
-
-
-      {/* Visual Settings Overlay */}
-      {showVisualSettings && (
-        <VisualSettings settings={appSettings} onUpdate={setAppSettings} />
-      )}
 
       {/* Main Workspace */}
       <div className="flex flex-1 overflow-hidden relative" ref={mainWorkspaceRef}>
@@ -1454,7 +1478,16 @@ export default function App() {
                     });
                   }}
                   onSelectCode={(id) => { setActiveCodeId(id); }}
-                  onUpdateCode={(id, up) => handleProjectUpdate({ ...project, codes: project.codes.map(c => c.id === id ? { ...c, ...up } : c) })}
+                  onUpdateCode={(id, up) => {
+                    const updatedCodes = project.codes.map(c => c.id === id ? { ...c, ...up } : c);
+                    handleProjectUpdate({ ...project, codes: updatedCodes });
+                    if (cloudProject) {
+                      const code = updatedCodes.find(c => c.id === id);
+                      if (code && (code.type === 'master' || code.type === 'suggested')) {
+                        saveSharedCode(cloudProject.id, code).catch(console.error);
+                      }
+                    }
+                  }}
                   onDeleteCode={(id) => {
                     handleProjectUpdate({
                       ...project,
@@ -1462,8 +1495,18 @@ export default function App() {
                       selections: project.selections.filter(s => s.codeId !== id),
                       transcripts: project.transcripts.map(t => ({ ...t, content: removeHighlightsForCode(t.content, id) }))
                     });
+                    if (cloudProject) {
+                      // Check if it was a shared code before deleting (we invoke delete regardless, it's safe)
+                      // Ideally check type but ID-based delete is fine for cleanup
+                      deleteSharedCode(cloudProject.id, id).catch(console.error);
+                    }
                   }}
-                  onMergeCode={(src, tgt) => handleProjectUpdate(mergeCodesInProject(project, src, tgt))}
+                  onMergeCode={(src, tgt) => {
+                    handleProjectUpdate(mergeCodesInProject(project, src, tgt));
+                    if (cloudProject) {
+                      deleteSharedCode(cloudProject.id, src).catch(console.error);
+                    }
+                  }}
                   searchQuery={codeSearchQuery}
                   onConfirm={(title, message, callback) => {
                     showConfirm(title, message, 'confirm').then(confirmed => {
@@ -1752,6 +1795,30 @@ export default function App() {
                     timestamp: Date.now(),
                     description: `Updated ${Object.keys(up).join(', ')}`
                   });
+                  // Sync update
+                  const isDraft = oldCode.type === 'suggested' && oldCode.status === 'draft';
+                  const isPromoting = up.type === 'master';
+                  const isPublishing = up.status === 'proposed';
+
+                  if (oldCode.type === 'master' || (!isDraft) || isPromoting || isPublishing) {
+                    saveSharedCode(cloudProject.id, { ...oldCode, ...up }).catch(console.error);
+                  }
+
+                  // Notify if promoting
+                  if (oldCode.type === 'suggested' && up.type === 'master') {
+                    sendNotification(cloudProject.id, {
+                      id: crypto.randomUUID(),
+                      projectId: cloudProject.id,
+                      type: 'codebook_change',
+                      title: 'Suggestion Accepted',
+                      message: `${user.displayName || 'Admin'} accepted the suggestion "${oldCode.name}" and promoted it to Master.`,
+                      timestamp: Date.now(),
+                      fromUserId: user.uid,
+                      fromUserName: user.displayName || 'Admin',
+                      targetUserIds: [], // To everyone
+                      readBy: [user.uid]
+                    }).catch(console.error);
+                  }
                 }
               }}
               onDeleteCode={(id) => {
@@ -1775,6 +1842,10 @@ export default function App() {
                     timestamp: Date.now(),
                     description: `Deleted code ${code.name}`
                   });
+                  // Sync deletion
+                  if (code.type === 'master' || code.type === 'suggested') {
+                    deleteSharedCode(cloudProject.id, id).catch(console.error);
+                  }
                 }
               }}
               onCreateCode={(type) => {
@@ -1797,6 +1868,7 @@ export default function App() {
                     timestamp: Date.now(),
                     description: `Merged into ${tgt}`
                   });
+                  deleteSharedCode(cloudProject.id, src).catch(console.error);
                 }
               }}
               currentUser={user || undefined}
@@ -1873,98 +1945,7 @@ export default function App() {
       )}
 
       {/* Version Control Panel */}
-      {showVersionControl && cloudProject && user && project && (
-        <VersionControlPanel
-          projectId={cloudProject.id}
-          currentUserId={user.uid}
-          currentUserName={user.displayName || 'User'}
-          isAdmin={isProjectAdmin}
-          codes={project.codes}
-          onClose={() => setShowVersionControl(false)}
-          onApplyProposal={(proposal) => {
-            if (!project) return;
-            let updatedProject = { ...project };
 
-            switch (proposal.action) {
-              case 'add':
-                if (proposal.newCode) {
-                  const newCode: Code = {
-                    id: generateId(),
-                    name: proposal.newCode.name || 'New Code',
-                    color: proposal.newCode.color || '#888888',
-                    type: 'master',
-                    createdBy: proposal.proposerId,
-                    description: proposal.newCode.description
-                  };
-                  updatedProject = { ...updatedProject, codes: [...updatedProject.codes, newCode] };
-                }
-                break;
-              case 'edit':
-                if (proposal.targetCodeId && proposal.proposedData) {
-                  updatedProject = {
-                    ...updatedProject,
-                    codes: updatedProject.codes.map(c =>
-                      c.id === proposal.targetCodeId ? { ...c, ...proposal.proposedData } : c
-                    )
-                  };
-                }
-                break;
-              case 'delete':
-                if (proposal.deleteCodeId) {
-                  updatedProject = {
-                    ...updatedProject,
-                    codes: updatedProject.codes.filter(c => c.id !== proposal.deleteCodeId)
-                  };
-                }
-                break;
-              case 'merge':
-                if (proposal.mergeSourceId && proposal.mergeTargetId) {
-                  updatedProject = mergeCodesInProject(updatedProject, proposal.mergeSourceId, proposal.mergeTargetId);
-                }
-                break;
-            }
-            handleProjectUpdate(updatedProject);
-
-            // Log version control event
-            logVersionControlEvent(cloudProject.id, {
-              id: crypto.randomUUID(),
-              projectId: cloudProject.id,
-              eventType: proposal.action === 'add' ? 'code_create' :
-                proposal.action === 'edit' ? 'code_edit' :
-                  proposal.action === 'delete' ? 'code_delete' :
-                    proposal.action === 'merge' ? 'code_merge' : 'proposal',
-              userId: user.uid,
-              userName: user.displayName || 'Admin',
-              timestamp: Date.now(),
-              description: `Accepted ${proposal.action} proposal from ${proposal.proposerName}`
-            }).catch(console.error);
-
-            // Notify everyone about the codebook change
-            sendNotification(cloudProject.id, {
-              id: crypto.randomUUID(),
-              projectId: cloudProject.id,
-              type: 'codebook_change',
-              title: 'Codebook Updated',
-              message: `${user.displayName || 'Admin'} applied a ${proposal.action} change to the master codebook (proposed by ${proposal.proposerName}).`,
-              timestamp: Date.now(),
-              fromUserId: user.uid,
-              fromUserName: user.displayName || 'Admin',
-              targetUserIds: [],
-              readBy: [user.uid]
-            }).catch(console.error);
-          }}
-          onUpdateCodes={(newCodes) => {
-            if (project) handleProjectUpdate({ ...project, codes: newCodes });
-          }}
-          onRestoreSnapshot={(snapshot) => {
-            if (!project) return;
-            const updatedTranscripts = project.transcripts.map(t =>
-              t.id === snapshot.transcriptId ? { ...t, content: snapshot.content } : t
-            );
-            handleProjectUpdate({ ...project, transcripts: updatedTranscripts });
-          }}
-        />
-      )}
 
 
 

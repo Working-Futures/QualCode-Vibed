@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { Code, CodeHistoryEntry, CodebookChangeProposal } from '../types';
 import { ConfirmationModal, ModalType } from './ConfirmationModal';
 import { Plus, Trash2, Folder, Lock, User, Sparkles, Shield, Tag, History, AlertTriangle, GitPullRequest, Send, Edit2, GitMerge, X, Eye } from 'lucide-react';
-import { getCodeHistory, logCodeHistory, submitProposal, sendNotification } from '../services/firestoreService';
+import { getCodeHistory, logCodeHistory, submitProposal, sendNotification, saveSharedCode } from '../services/firestoreService';
 
 interface CodebookProps {
   codes: Code[];
@@ -511,6 +511,11 @@ export const Codebook: React.FC<CodebookProps> = ({
                         'Submit Suggestion',
                         'Submit this code for admin approval?',
                         async () => {
+                          const publishedCode = { ...activeCode, status: 'proposed' as const };
+
+                          // Update local status first
+                          onUpdateCode(activeCode.id, { status: 'proposed' });
+
                           const proposal: CodebookChangeProposal = {
                             id: crypto.randomUUID(),
                             projectId,
@@ -520,11 +525,13 @@ export const Codebook: React.FC<CodebookProps> = ({
                             timestamp: Date.now(),
                             status: 'pending',
                             reason: activeCode.reason || '',
-                            newCode: activeCode
+                            newCode: publishedCode
                           };
 
                           try {
                             await submitProposal(projectId, proposal);
+                            // Publish to shared collection so admins can review it properly
+                            await saveSharedCode(projectId, publishedCode);
                             await sendNotification(projectId, {
                               id: crypto.randomUUID(),
                               projectId,

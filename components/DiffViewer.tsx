@@ -10,6 +10,7 @@ interface DiffViewerProps {
     onContentChange?: (content: string) => void;
     showAcceptAll?: boolean;
     defaultAccepted?: boolean;
+    onAllResolved?: () => void;
 }
 
 type VisualChunk =
@@ -51,7 +52,8 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     readOnly = false,
     onContentChange,
     showAcceptAll = false,
-    defaultAccepted = false
+    defaultAccepted = false,
+    onAllResolved
 }) => {
     const [diffs, setDiffs] = useState<DiffChunk[]>([]);
 
@@ -88,6 +90,20 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
         setEditingChunkIndex(null);
         setEditValue('');
     }, [originalContent, modifiedContent, defaultAccepted]);
+
+    // Check for "All Resolved"
+    useEffect(() => {
+        const changeIndices = Object.keys(diffStatus);
+        if (changeIndices.length === 0) return;
+
+        const allResolved = changeIndices.every(idx => diffStatus[parseInt(idx)] !== 'pending');
+        if (allResolved && onAllResolved) {
+            // Use timeout to allow UI to update first
+            setTimeout(() => {
+                onAllResolved();
+            }, 500);
+        }
+    }, [diffStatus, onAllResolved]);
 
     // Process visual chunks (group adjacent delete+insert into replace)
     useEffect(() => {
@@ -146,6 +162,8 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
         setDiffStatus(prev => {
             const next = { ...prev };
             indices.forEach(i => next[i] = status);
+            // After setting status, if this was the last pending item, 
+            // the Effect [diffStatus] will trigger onAllResolved.
             return next;
         });
     };
@@ -204,6 +222,25 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
 
     const lineClass = "py-0.5 px-2 min-h-[1.5rem] leading-relaxed whitespace-pre-wrap font-sans text-sm";
 
+    // Render plain text block (used for accepted/context lines)
+    const renderPlainBlock = (lines: string[], key: number | string) => (
+        <div key={key} className="bg-white text-slate-600 transition-colors hover:bg-slate-50">
+            {lines.length > 5 ? (
+                <>
+                    <div className={lineClass}>{lines[0]}</div>
+                    <div className={lineClass}>{lines[1]}</div>
+                    <div className="text-[10px] bg-slate-50 text-slate-400 py-1 px-4 text-center cursor-help" title={`${lines.length - 4} collapsed lines`}>
+                        ... {lines.length - 4} unchanged ...
+                    </div>
+                    <div className={lineClass}>{lines[lines.length - 2]}</div>
+                    <div className={lineClass}>{lines[lines.length - 1]}</div>
+                </>
+            ) : (
+                lines.map((l, i) => <div key={i} className={lineClass}>{l || <br />}</div>)
+            )}
+        </div>
+    );
+
     const getChunkStatus = (chunk: VisualChunk): 'pending' | 'accepted' | 'rejected' => {
         if (chunk.type === 'replace') {
             const s1 = diffStatus[chunk.diffIndexDel];
@@ -221,7 +258,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
 
     return (
         <div className="border rounded-lg overflow-hidden bg-white shadow-sm">
-            {!readOnly && showAcceptAll && (
+            {!readOnly && showAcceptAll && Object.values(diffStatus).some(s => s === 'pending') && (
                 <div className="bg-slate-50 p-2 border-b flex gap-2 justify-end sticky top-0 z-10">
                     <button onClick={handleAcceptAll} className="text-[10px] bg-green-100 text-green-700 px-2 py-1 rounded font-bold hover:bg-green-200">Accept All</button>
                     <button onClick={handleRejectAll} className="text-[10px] bg-red-100 text-red-700 px-2 py-1 rounded font-bold hover:bg-red-200">Reject All</button>
@@ -231,23 +268,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
             <div className="divide-y divide-slate-100 max-h-[600px] overflow-y-auto">
                 {visualChunks.map((chunk, idx) => {
                     if (chunk.type === 'equal') {
-                        return (
-                            <div key={idx} className="bg-white text-slate-600 transition-colors hover:bg-slate-50">
-                                {chunk.lines.length > 5 ? (
-                                    <>
-                                        <div className={lineClass}>{chunk.lines[0]}</div>
-                                        <div className={lineClass}>{chunk.lines[1]}</div>
-                                        <div className="text-[10px] bg-slate-50 text-slate-400 py-1 px-4 text-center cursor-help" title={`${chunk.lines.length - 4} collapsed lines`}>
-                                            ... {chunk.lines.length - 4} unchanged ...
-                                        </div>
-                                        <div className={lineClass}>{chunk.lines[chunk.lines.length - 2]}</div>
-                                        <div className={lineClass}>{chunk.lines[chunk.lines.length - 1]}</div>
-                                    </>
-                                ) : (
-                                    chunk.lines.map((l, i) => <div key={i} className={lineClass}>{l || <br />}</div>)
-                                )}
-                            </div>
-                        );
+                        return renderPlainBlock(chunk.lines, idx);
                     }
 
                     const status = getChunkStatus(chunk);
@@ -255,26 +276,41 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
                     const isRejected = status === 'rejected';
                     const isEditing = editingChunkIndex === idx;
 
+                    // --- RESOLVED STATES (Remove diff UI) ---
+
+                    // Replace
                     if (chunk.type === 'replace') {
-                        let divClass = "group relative border-l-4 transition-all ";
-                        if (isAccepted) divClass += "bg-green-50/20 border-green-500 opacity-60 hover:opacity-100";
-                        else if (isRejected) divClass += "bg-slate-50/50 border-slate-300 opacity-60 hover:opacity-100";
-                        else divClass += "bg-amber-50/40 border-amber-300";
+                        if (isAccepted) return renderPlainBlock(chunk.newLines, idx); // Show NEW
+                        if (isRejected) return renderPlainBlock(chunk.oldLines, idx); // Show OLD
+                    }
+
+                    // Insert
+                    if (chunk.type === 'insert') {
+                        if (isAccepted) return renderPlainBlock(chunk.lines, idx); // Show Content
+                        if (isRejected) return null; // Remove Content
+                    }
+
+                    // Delete
+                    if (chunk.type === 'delete') {
+                        if (isAccepted) return null; // Remove Content
+                        if (isRejected) return renderPlainBlock(chunk.lines, idx); // Restore Content
+                    }
+
+                    // --- PENDING STATES (Render Diff UI) ---
+
+                    if (chunk.type === 'replace') {
+                        let divClass = "group relative border-l-4 transition-all bg-amber-50/40 border-amber-300";
 
                         return (
                             <div key={idx} className={divClass}>
                                 <div className="p-2 space-y-1">
                                     {!isEditing && (
                                         <>
-                                            <div className={`rounded select-none transition-all ${isAccepted ? 'hidden' : isRejected ? 'text-slate-700' : 'bg-red-100/40 opacity-70 line-through decoration-red-400 text-red-800'}`}>
+                                            <div className="bg-red-100/40 opacity-70 line-through decoration-red-400 text-red-800 rounded select-none">
                                                 {chunk.oldLines.map((l, i) => <div key={i} className={lineClass}>{l}</div>)}
                                             </div>
-
-                                            {!isAccepted && !isRejected && (
-                                                <div className="flex justify-center -my-2 opacity-20 relative z-0"><CornerDownRight size={16} /></div>
-                                            )}
-
-                                            <div className={`rounded shadow-sm transition-all ${isRejected ? 'hidden' : isAccepted ? 'text-green-900 font-medium' : 'bg-green-100/40 text-green-900 font-medium'}`}>
+                                            <div className="flex justify-center -my-2 opacity-20 relative z-0"><CornerDownRight size={16} /></div>
+                                            <div className="bg-green-100/40 text-green-900 font-medium rounded shadow-sm">
                                                 {chunk.newLines.map((l, i) => <div key={i} className={lineClass}>{l}</div>)}
                                             </div>
                                         </>
@@ -314,10 +350,10 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
                                         <button onClick={(e) => { e.stopPropagation(); handleEditStart(idx, chunk.newLines); }} className="p-1.5 rounded-full shadow-sm bg-amber-100 text-amber-700 hover:bg-amber-200 border border-amber-200" title="Edit change">
                                             <Edit2 size={12} />
                                         </button>
-                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndexDel, chunk.diffIndexIns], 'rejected'); }} className={`p-1.5 rounded-full shadow-sm border transition-colors ${isRejected ? 'bg-red-600 text-white' : 'bg-white text-slate-400 hover:text-red-600 hover:bg-red-50'}`} title="Reject">
+                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndexDel, chunk.diffIndexIns], 'rejected'); }} className="p-1.5 rounded-full shadow-sm border bg-white text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Reject">
                                             <X size={14} />
                                         </button>
-                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndexDel, chunk.diffIndexIns], 'accepted'); }} className={`p-1.5 rounded-full shadow-sm border transition-colors ${isAccepted ? 'bg-green-600 text-white' : 'bg-white text-slate-400 hover:text-green-600 hover:bg-green-50'}`} title="Accept">
+                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndexDel, chunk.diffIndexIns], 'accepted'); }} className="p-1.5 rounded-full shadow-sm border bg-white text-slate-400 hover:text-green-600 hover:bg-green-50 transition-colors" title="Accept">
                                             <Check size={14} />
                                         </button>
                                     </div>
@@ -327,10 +363,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
                     }
 
                     if (chunk.type === 'insert') {
-                        let divClass = "group relative border-l-4 transition-all ";
-                        if (isAccepted) divClass += "bg-green-50/20 border-green-500 opacity-60 hover:opacity-100";
-                        else if (isRejected) divClass += "bg-slate-50/50 border-slate-300 opacity-40 hover:opacity-100 line-through text-slate-400";
-                        else divClass += "bg-green-50/30 border-green-500";
+                        let divClass = "group relative border-l-4 transition-all bg-green-50/30 border-green-500";
 
                         return (
                             <div key={idx} className={divClass}>
@@ -352,9 +385,9 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
                                             </div>
                                         </div>
                                     ) : (
-                                        <div className={`transition-all ${isRejected ? 'hidden' : isAccepted ? 'text-green-900 border-none' : 'bg-green-100/20 text-green-900'}`}>
+                                        <div className="bg-green-100/20 text-green-900 border-none">
                                             {chunk.lines.map((l, i) => (
-                                                <div key={i} className={`${lineClass} ${isRejected ? 'line-through' : ''}`}>{l}</div>
+                                                <div key={i} className={lineClass}>{l}</div>
                                             ))}
                                         </div>
                                     )}
@@ -364,10 +397,10 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
                                         <button onClick={(e) => { e.stopPropagation(); handleEditStart(idx, chunk.lines); }} className="p-1.5 rounded-full shadow-sm bg-amber-100 text-amber-700 hover:bg-amber-200 border border-amber-200" title="Edit addition">
                                             <Edit2 size={12} />
                                         </button>
-                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'rejected'); }} className={`p-1.5 rounded-full shadow-sm border transition-colors ${isRejected ? 'bg-red-600 text-white' : 'bg-white text-slate-400 hover:text-red-600 hover:bg-red-50'}`} title="Reject">
+                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'rejected'); }} className="p-1.5 rounded-full shadow-sm border bg-white text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Reject">
                                             <X size={14} />
                                         </button>
-                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'accepted'); }} className={`p-1.5 rounded-full shadow-sm border transition-colors ${isAccepted ? 'bg-green-600 text-white' : 'bg-white text-slate-400 hover:text-green-600 hover:bg-green-50'}`} title="Accept">
+                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'accepted'); }} className="p-1.5 rounded-full shadow-sm border bg-white text-slate-400 hover:text-green-600 hover:bg-green-50 transition-colors" title="Accept">
                                             <Check size={14} />
                                         </button>
                                     </div>
@@ -377,27 +410,23 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
                     }
 
                     if (chunk.type === 'delete') {
-                        let divClass = "group relative border-l-4 transition-all ";
-                        if (isAccepted) divClass += "bg-red-50/20 border-red-500 opacity-60 hover:opacity-100";
-                        else if (isRejected) divClass += "bg-slate-50/50 border-slate-300 opacity-60 hover:opacity-100";
-                        else divClass += "bg-red-50/30 border-red-500";
+                        let divClass = "group relative border-l-4 transition-all bg-red-50/30 border-red-500";
 
                         return (
                             <div key={idx} className={divClass}>
                                 <div className="p-2">
-                                    <div className={`transition-all ${isAccepted ? 'hidden' : isRejected ? 'text-slate-700' : 'bg-red-100/20 line-through decoration-red-400 text-red-900 opacity-60'}`}>
+                                    <div className="bg-red-100/20 line-through decoration-red-400 text-red-900 opacity-60">
                                         {chunk.lines.map((l, i) => (
                                             <div key={i} className={lineClass}>{l}</div>
                                         ))}
                                     </div>
-                                    {isAccepted && <div className="text-[10px] text-red-400 px-2 italic">(Deleted)</div>}
                                 </div>
                                 {!readOnly && (
                                     <div className="absolute right-2 top-2 flex gap-1 z-20 bg-white/80 rounded-lg p-0.5 shadow-sm border border-slate-200">
-                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'rejected'); }} className={`p-1.5 rounded-full shadow-sm border transition-colors ${isRejected ? 'bg-red-600 text-white' : 'bg-white text-slate-400 hover:text-red-600 hover:bg-red-50'}`} title="Reject (Keep Text)">
+                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'rejected'); }} className="p-1.5 rounded-full shadow-sm border bg-white text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors" title="Reject (Keep Text)">
                                             <X size={14} />
                                         </button>
-                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'accepted'); }} className={`p-1.5 rounded-full shadow-sm border transition-colors ${isAccepted ? 'bg-green-600 text-white' : 'bg-white text-slate-400 hover:text-green-600 hover:bg-green-50'}`} title="Accept (Delete)">
+                                        <button onClick={(e) => { e.stopPropagation(); setStatus([chunk.diffIndex], 'accepted'); }} className="p-1.5 rounded-full shadow-sm border bg-white text-slate-400 hover:text-green-600 hover:bg-green-50 transition-colors" title="Accept (Delete)">
                                             <Check size={14} />
                                         </button>
                                     </div>
@@ -409,7 +438,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
             </div>
             {/* Status Footer */}
             <div className="bg-slate-50 px-3 py-1.5 border-t text-[10px] text-slate-400 flex justify-between">
-                <span>{diffs.filter(d => d.type !== 'equal').length} change blocks found</span>
+                <span>{diffs.filter(d => d.type !== 'equal' && diffStatus[diffs.indexOf(d)] === 'pending').length} pending changes</span>
                 <span>{Object.values(diffStatus).filter(s => s === 'accepted').length} accepted, {Object.values(diffStatus).filter(s => s === 'rejected').length} rejected</span>
             </div>
         </div>

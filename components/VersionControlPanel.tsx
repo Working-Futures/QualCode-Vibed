@@ -416,6 +416,7 @@ export const VersionControlPanel: React.FC<VersionControlPanelProps> = ({
         if (type.includes('merge')) return <GitMerge size={14} className="text-purple-500" />;
         if (type.includes('split')) return <Scissors size={14} className="text-orange-500" />;
         if (type.includes('proposal')) return <GitPullRequest size={14} className="text-amber-500" />;
+        if (type.includes('change_request')) return <FileText size={14} className="text-cyan-500" />;
         if (type.includes('promoted')) return <Shield size={14} className="text-indigo-500" />;
         return <History size={14} className="text-slate-400" />;
     };
@@ -694,17 +695,28 @@ export const VersionControlPanel: React.FC<VersionControlPanelProps> = ({
                                                     {isAdmin && proposal.status === 'pending' && (
                                                         <div className="flex items-center gap-2 pt-2">
                                                             <button
-                                                                onClick={() => handleAcceptProposal(proposal)}
-                                                                className="px-4 py-2 bg-green-600 text-white text-xs font-bold rounded-lg hover:bg-green-700 transition-colors flex items-center gap-1.5 shadow-sm"
+                                                                onClick={() => onNavigateToCode?.(proposal.targetCodeId || proposal.newCode?.id || '', 'suggested')}
+                                                                className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-1.5 shadow-sm"
                                                             >
-                                                                <Check size={14} /> Accept & Apply
+                                                                <ArrowRight size={14} /> Review in Codebook
                                                             </button>
+
+                                                            <div className="h-4 w-px bg-slate-200 mx-1"></div>
+
+                                                            <button
+                                                                onClick={() => handleAcceptProposal(proposal)}
+                                                                className="px-3 py-2 bg-green-100 text-green-700 text-xs font-bold rounded-lg hover:bg-green-200 transition-colors flex items-center gap-1.5"
+                                                                title="Apply changes and close proposal"
+                                                            >
+                                                                <Check size={14} /> Mark Completed
+                                                            </button>
+
                                                             {showRejectInput === proposal.id ? (
-                                                                <div className="flex-1 flex gap-2">
+                                                                <div className="flex items-center gap-2 animate-in fade-in slide-in-from-left-1">
                                                                     <input
                                                                         type="text"
-                                                                        placeholder="Reason for rejection..."
-                                                                        className="flex-1 text-xs border border-red-200 rounded-lg px-3 py-2 focus:ring-red-500 focus:border-red-500 bg-[var(--bg-paper)] text-[var(--text-main)]"
+                                                                        placeholder="Reason..."
+                                                                        className="w-32 text-xs border border-red-200 rounded px-2 py-1 focus:ring-red-500 focus:border-red-500 bg-white"
                                                                         value={rejectionReason}
                                                                         onChange={(e) => setRejectionReason(e.target.value)}
                                                                         autoFocus
@@ -712,18 +724,18 @@ export const VersionControlPanel: React.FC<VersionControlPanelProps> = ({
                                                                     />
                                                                     <button
                                                                         onClick={() => handleRejectProposal(proposal)}
-                                                                        className="px-3 py-2 bg-red-600 text-white text-xs font-bold rounded-lg hover:bg-red-700"
+                                                                        className="p-1 bg-red-600 text-white rounded hover:bg-red-700"
                                                                     >
-                                                                        Reject
+                                                                        <Check size={12} />
                                                                     </button>
                                                                     <button onClick={() => { setShowRejectInput(null); setRejectionReason(''); }} className="text-slate-400 hover:text-slate-600">
-                                                                        <X size={14} />
+                                                                        <X size={12} />
                                                                     </button>
                                                                 </div>
                                                             ) : (
                                                                 <button
                                                                     onClick={() => setShowRejectInput(proposal.id)}
-                                                                    className="px-4 py-2 bg-red-100 text-red-700 text-xs font-bold rounded-lg hover:bg-red-200 transition-colors flex items-center gap-1.5"
+                                                                    className="px-3 py-2 text-slate-400 hover:text-red-600 hover:bg-red-50 text-xs font-bold rounded-lg transition-colors flex items-center gap-1.5"
                                                                 >
                                                                     <XCircle size={14} /> Reject
                                                                 </button>
@@ -814,7 +826,11 @@ export const VersionControlPanel: React.FC<VersionControlPanelProps> = ({
                                                                 modifiedContent={req.content || ''}
                                                                 readOnly={req.status !== 'pending' || !isAdmin}
                                                                 onContentChange={(val) => setDraftContents(prev => ({ ...prev, [req.id]: val }))}
-                                                                defaultAccepted={true}
+                                                                defaultAccepted={false}
+                                                                onAllResolved={() => {
+                                                                    // Auto-accept the request when all individual diffs are resolved
+                                                                    handleAcceptChangeRequest(req);
+                                                                }}
                                                                 showAcceptAll={isAdmin && req.status === 'pending'}
                                                             />
                                                             {/* Contest Button for Non-Admins */}

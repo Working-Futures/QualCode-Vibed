@@ -12,6 +12,7 @@ export interface Code {
   createdBy?: string;
   suggestedBy?: string; // ID of user who suggested it
   reason?: string; // Reason for suggestion (if type is suggested)
+  status?: 'draft' | 'proposed'; // Draft = private to user, Proposed = shared with admins
 }
 
 export interface Selection {

@@ -175,9 +175,9 @@ export async function updateTranscript(
 // ─── Codes (Shared Codebook) ───
 
 export async function saveCodes(projectId: string, codes: Code[]): Promise<void> {
-    // Only save shared codes (master + suggested) to the shared collection
-    // Personal codes are stored per-user in userdata
-    const sharedCodes = codes.filter(c => c.type === 'master' || c.type === 'suggested');
+    // Only save shared codes (master + PUBLISHED suggested) to the shared collection
+    // Personal codes and DRAFT suggested codes are stored per-user in userdata
+    const sharedCodes = codes.filter(c => c.type === 'master' || (c.type === 'suggested' && c.status !== 'draft'));
 
     const batch = writeBatch(db);
     const codesRef = collection(db, 'projects', projectId, 'codes');
@@ -188,22 +188,35 @@ export async function saveCodes(projectId: string, codes: Code[]): Promise<void>
     const newIds = new Set(sharedCodes.map(c => c.id));
 
     // Delete codes that no longer exist in the shared set
+    // REFACTOR: We DO NOT delete codes here anymore to prevent accidental data loss 
+    // if the client has a stale state. Deletions must be explicit via deleteSharedCode.
+    /* 
     existing.docs.forEach((d) => {
         if (!newIds.has(d.id)) {
             batch.delete(d.ref);
         }
-    });
+    }); 
+    */
 
     // Create or update current shared codes
     sharedCodes.forEach((code) => {
         batch.set(
             doc(db, 'projects', projectId, 'codes', code.id),
             code,
-            { merge: true }
+            { merge: true } // Merge to avoid overwriting unrelated fields if any
         );
     });
 
     await batch.commit();
+}
+
+export async function saveSharedCode(projectId: string, code: Code): Promise<void> {
+    if (code.type !== 'master' && code.type !== 'suggested') return;
+    await setDoc(doc(db, 'projects', projectId, 'codes', code.id), code, { merge: true });
+}
+
+export async function deleteSharedCode(projectId: string, codeId: string): Promise<void> {
+    await deleteDoc(doc(db, 'projects', projectId, 'codes', codeId));
 }
 
 export async function getCodes(projectId: string): Promise<Code[]> {
@@ -687,6 +700,23 @@ export async function updateProjectMemberRole(projectId: string, userId: string,
 export async function logCodeHistory(projectId: string, entry: CodeHistoryEntry): Promise<void> {
     const ref = doc(db, 'projects', projectId, 'codeHistory', entry.id);
     await setDoc(ref, entry);
+
+    // Also log to main Activity Log for VC Panel visibility
+    let eventType: VersionControlEvent['eventType'] = 'code_edit';
+    if (entry.changeType === 'create') eventType = 'code_create';
+    if (entry.changeType === 'delete') eventType = 'code_delete';
+    if (entry.changeType === 'merge') eventType = 'code_merge';
+
+    await logVersionControlEvent(projectId, {
+        id: crypto.randomUUID(),
+        projectId,
+        eventType,
+        userId: entry.userId,
+        userName: entry.userName,
+        timestamp: entry.timestamp,
+        description: entry.description || `Performed ${entry.changeType} on code`,
+        metadata: { codeId: entry.codeId, changeType: entry.changeType }
+    });
 }
 
 export async function getCodeHistory(projectId: string, codeId: string): Promise<CodeHistoryEntry[]> {
@@ -703,6 +733,18 @@ export async function getCodeHistory(projectId: string, codeId: string): Promise
 
 export async function submitProposal(projectId: string, proposal: CodebookChangeProposal): Promise<void> {
     await setDoc(doc(db, 'projects', projectId, 'proposals', proposal.id), proposal);
+
+    // Log Activity
+    await logVersionControlEvent(projectId, {
+        id: crypto.randomUUID(),
+        projectId,
+        eventType: 'proposal',
+        userId: proposal.proposerId,
+        userName: proposal.proposerName,
+        timestamp: Date.now(),
+        description: `Submitted a ${proposal.action} proposal for code "${proposal.targetCodeName || proposal.newCode?.name || proposal.deleteCodeName || proposal.mergeSourceName}"`,
+        metadata: { proposalId: proposal.id, action: proposal.action }
+    });
 }
 
 export function subscribeToProposals(projectId: string, callback: (proposals: CodebookChangeProposal[]) => void): Unsubscribe {
@@ -736,6 +778,18 @@ export async function reviewProposal(
     };
     if (rejectionReason) updates.rejectionReason = rejectionReason;
     await updateDoc(ref, updates);
+
+    // Log Activity
+    await logVersionControlEvent(projectId, {
+        id: crypto.randomUUID(),
+        projectId,
+        eventType: 'proposal',
+        userId: reviewerId,
+        userName: reviewerName,
+        timestamp: Date.now(),
+        description: `${status === 'accepted' ? 'Accepted' : 'Rejected'} proposal ${proposalId}`,
+        metadata: { proposalId, status, rejectionReason }
+    });
 }
 
 // ─── Notifications ───
@@ -873,4 +927,18 @@ export async function handleChangeRequestWithFeedback(
         batch.update(transcriptRef, { content: newContent });
     }
     await batch.commit();
+
+    // Log Activity
+    if (reviewerId && reviewerName) {
+        await logVersionControlEvent(projectId, {
+            id: crypto.randomUUID(),
+            projectId,
+            eventType: 'change_request',
+            userId: reviewerId,
+            userName: reviewerName,
+            timestamp: Date.now(),
+            description: `${status === 'accepted' ? 'Accepted' : 'Rejected'} change request for document`,
+            metadata: { requestId, status, transcriptId }
+        });
+    }
 }
