@@ -33,7 +33,11 @@ import {
     ChatMessage,
     DirectMessage,
     TranscriptChangeRequest,
-    CodeHistoryEntry
+    CodeHistoryEntry,
+    CodebookChangeProposal,
+    AppNotification,
+    DocumentSnapshot,
+    VersionControlEvent
 } from '../types';
 
 // ─── User Profile ───
@@ -171,23 +175,27 @@ export async function updateTranscript(
 // ─── Codes (Shared Codebook) ───
 
 export async function saveCodes(projectId: string, codes: Code[]): Promise<void> {
+    // Only save shared codes (master + suggested) to the shared collection
+    // Personal codes are stored per-user in userdata
+    const sharedCodes = codes.filter(c => c.type === 'master' || c.type === 'suggested');
+
     const batch = writeBatch(db);
     const codesRef = collection(db, 'projects', projectId, 'codes');
 
     // Fetch existing codes to diff
     const existing = await getDocs(codesRef);
     const existingIds = new Set(existing.docs.map(d => d.id));
-    const newIds = new Set(codes.map(c => c.id));
+    const newIds = new Set(sharedCodes.map(c => c.id));
 
-    // Delete codes that no longer exist
+    // Delete codes that no longer exist in the shared set
     existing.docs.forEach((d) => {
         if (!newIds.has(d.id)) {
             batch.delete(d.ref);
         }
     });
 
-    // Create or update current codes
-    codes.forEach((code) => {
+    // Create or update current shared codes
+    sharedCodes.forEach((code) => {
         batch.set(
             doc(db, 'projects', projectId, 'codes', code.id),
             code,
@@ -211,6 +219,8 @@ export function subscribeToCodes(
     return onSnapshot(q, (snapshot) => {
         const codes = snapshot.docs.map((d) => d.data() as Code);
         onCurrent(codes);
+    }, (error) => {
+        console.error("Error subscribing to codes:", error);
     });
 }
 
@@ -232,33 +242,50 @@ export async function getUserProjectData(
     projectId: string,
     userId: string
 ): Promise<UserProjectData> {
-    const snap = await getDoc(doc(db, 'projects', projectId, 'userdata', userId));
-    if (snap.exists()) {
-        return snap.data() as UserProjectData;
+    console.log(`[firestoreService.getUserProjectData] Fetching data for user=${userId} in project=${projectId}`);
+    try {
+        const snap = await getDoc(doc(db, 'projects', projectId, 'userdata', userId));
+        if (snap.exists()) {
+            const data = snap.data() as UserProjectData;
+            console.log(`[firestoreService.getUserProjectData] ✓ Found data: ${data.selections?.length || 0} selections, ${Object.keys(data.transcriptMemos || {}).length} transcript memos`);
+            return data;
+        }
+        console.log(`[firestoreService.getUserProjectData] No userdata document found for user=${userId}, returning defaults`);
+        return { selections: [], transcriptMemos: {}, personalMemo: '' };
+    } catch (err) {
+        console.error(`[firestoreService.getUserProjectData] ❌ Error fetching data for user=${userId}:`, err);
+        throw err;
     }
-    return { selections: [], transcriptMemos: {}, personalMemo: '' };
 }
 
 export async function getAllCollaboratorData(
     projectId: string,
     excludeUserId?: string
 ): Promise<CollaboratorData[]> {
-    const snap = await getDocs(collection(db, 'projects', projectId, 'userdata'));
-    const projectSnap = await getDoc(doc(db, 'projects', projectId));
-    const project = projectSnap.data() as CloudProject;
+    console.log(`[firestoreService.getAllCollaboratorData] Fetching all collaborator data for project=${projectId}, excluding=${excludeUserId || 'none'}`);
+    try {
+        const snap = await getDocs(collection(db, 'projects', projectId, 'userdata'));
+        const projectSnap = await getDoc(doc(db, 'projects', projectId));
+        const project = projectSnap.data() as CloudProject;
 
-    return snap.docs
-        .filter((d) => d.id !== excludeUserId)
-        .map((d) => {
-            const data = d.data() as UserProjectData;
-            const member = project.members[d.id];
-            return {
-                userId: d.id,
-                displayName: member?.displayName || 'Unknown',
-                email: member?.email || '',
-                ...data,
-            };
-        });
+        const result = snap.docs
+            .filter((d) => d.id !== excludeUserId)
+            .map((d) => {
+                const data = d.data() as UserProjectData;
+                const member = project.members[d.id];
+                return {
+                    userId: d.id,
+                    displayName: member?.displayName || 'Unknown',
+                    email: member?.email || '',
+                    ...data,
+                };
+            });
+        console.log(`[firestoreService.getAllCollaboratorData] ✓ Got ${result.length} collaborators with data`);
+        return result;
+    } catch (err) {
+        console.error(`[firestoreService.getAllCollaboratorData] ❌ Error:`, err);
+        throw err;
+    }
 }
 
 // ─── Invitations ───
@@ -391,13 +418,41 @@ export function listenToTranscripts(
 // ─── Sticky Notes ───
 
 export async function addStickyNote(projectId: string, note: StickyNote): Promise<void> {
+    console.log('[StickyNote] addStickyNote called', { projectId, noteId: note.id, note });
     const ref = doc(db, 'projects', projectId, 'notes', note.id);
-    await setDoc(ref, note);
+    // Strip undefined fields to avoid any Firestore issues
+    const cleanNote: Record<string, any> = {};
+    for (const [key, value] of Object.entries(note)) {
+        if (value !== undefined) {
+            cleanNote[key] = value;
+        }
+    }
+    try {
+        await setDoc(ref, cleanNote);
+        console.log('[StickyNote] addStickyNote SUCCESS', note.id);
+    } catch (err) {
+        console.error('[StickyNote] addStickyNote FAILED', note.id, err);
+        throw err;
+    }
 }
 
 export async function updateStickyNote(projectId: string, noteId: string, updates: Partial<StickyNote>): Promise<void> {
+    console.log('[StickyNote] updateStickyNote called', { projectId, noteId, updates });
     const ref = doc(db, 'projects', projectId, 'notes', noteId);
-    await updateDoc(ref, updates);
+    // Strip undefined fields
+    const cleanUpdates: Record<string, any> = {};
+    for (const [key, value] of Object.entries(updates)) {
+        if (value !== undefined) {
+            cleanUpdates[key] = value;
+        }
+    }
+    try {
+        await setDoc(ref, cleanUpdates, { merge: true });
+        console.log('[StickyNote] updateStickyNote SUCCESS', noteId);
+    } catch (err) {
+        console.error('[StickyNote] updateStickyNote FAILED', noteId, err);
+        throw err;
+    }
 }
 
 export async function deleteStickyNote(projectId: string, noteId: string): Promise<void> {
@@ -405,12 +460,21 @@ export async function deleteStickyNote(projectId: string, noteId: string): Promi
 }
 
 export function subscribeToStickyNotes(projectId: string, callback: (notes: StickyNote[]) => void): Unsubscribe {
+    console.log('[StickyNote] Subscribing to notes for project', projectId);
     const q = query(collection(db, 'projects', projectId, 'notes'));
     return onSnapshot(q, (snapshot) => {
         const notes = snapshot.docs.map(d => d.data() as StickyNote);
+        console.log('[StickyNote] onSnapshot fired, notes count:', notes.length, 'fromCache:', snapshot.metadata.fromCache, 'hasPendingWrites:', snapshot.metadata.hasPendingWrites);
+        if (notes.length > 0) {
+            console.log('[StickyNote] Note IDs:', notes.map(n => n.id));
+        }
         callback(notes);
+    }, (error) => {
+        console.error('[StickyNote] Subscription ERROR:', error);
     });
 }
+
+// ─── Chat System ───
 
 // ─── Chat System ───
 
@@ -419,9 +483,17 @@ export async function sendChatMessage(projectId: string, message: ChatMessage): 
     await setDoc(ref, message);
 }
 
-export async function updateChatMessage(projectId: string, messageId: string, updates: Partial<ChatMessage>): Promise<void> {
+export async function updateChatMessage(projectId: string, messageId: string, updates: Partial<ChatMessage>, previousContent?: string): Promise<void> {
     const ref = doc(db, 'projects', projectId, 'chat', messageId);
-    await updateDoc(ref, updates);
+    if (previousContent) {
+        // Push to history
+        await updateDoc(ref, {
+            ...updates,
+            editHistory: arrayUnion({ content: previousContent, timestamp: Date.now() })
+        });
+    } else {
+        await updateDoc(ref, updates);
+    }
 }
 
 export function subscribeToChatMessages(projectId: string, callback: (messages: ChatMessage[]) => void): Unsubscribe {
@@ -433,7 +505,37 @@ export function subscribeToChatMessages(projectId: string, callback: (messages: 
     return onSnapshot(q, (snapshot) => {
         const messages = snapshot.docs.map(d => d.data() as ChatMessage);
         callback(messages);
+    }, (error) => {
+        console.error("Error subscribing to chat messages:", error);
     });
+}
+
+/**
+ * Deletes a chat message.
+ * If userId is provided, it performs a "local delete" (hides it for that user).
+ * If no userId is provided, it performs a "global delete" (unsend).
+ */
+export async function deleteChatMessage(projectId: string, messageId: string, userId?: string): Promise<void> {
+    const ref = doc(db, 'projects', projectId, 'chat', messageId);
+    if (userId) {
+        // Local delete: Add user to deletedFor array
+        await updateDoc(ref, {
+            deletedFor: arrayUnion(userId)
+        });
+    } else {
+        // Global delete (Unsend)
+        await deleteDoc(ref);
+    }
+}
+
+export async function clearChatHistory(projectId: string): Promise<void> {
+    const q = query(collection(db, 'projects', projectId, 'chat'));
+    const snapshot = await getDocs(q);
+    const batch = writeBatch(db);
+    snapshot.docs.forEach((d) => {
+        batch.delete(d.ref);
+    });
+    await batch.commit();
 }
 
 // ─── Direct Messages ───
@@ -445,6 +547,29 @@ export function getConversationKey(userId1: string, userId2: string): string {
 export async function sendDirectMessage(projectId: string, message: DirectMessage): Promise<void> {
     const ref = doc(db, 'projects', projectId, 'directMessages', message.id);
     await setDoc(ref, message);
+}
+
+export async function updateDirectMessage(projectId: string, messageId: string, updates: Partial<DirectMessage>, previousContent?: string): Promise<void> {
+    const ref = doc(db, 'projects', projectId, 'directMessages', messageId);
+    if (previousContent) {
+        await updateDoc(ref, {
+            ...updates,
+            editHistory: arrayUnion({ content: previousContent, timestamp: Date.now() })
+        });
+    } else {
+        await updateDoc(ref, updates);
+    }
+}
+
+export async function deleteDirectMessage(projectId: string, messageId: string, userId?: string): Promise<void> {
+    const ref = doc(db, 'projects', projectId, 'directMessages', messageId);
+    if (userId) {
+        await updateDoc(ref, {
+            deletedFor: arrayUnion(userId)
+        });
+    } else {
+        await deleteDoc(ref);
+    }
 }
 
 export function subscribeToDirectMessages(
@@ -461,6 +586,8 @@ export function subscribeToDirectMessages(
     return onSnapshot(q, (snapshot) => {
         const messages = snapshot.docs.map(d => d.data() as DirectMessage);
         callback(messages);
+    }, (error) => {
+        console.error("Error subscribing to direct messages:", error);
     });
 }
 
@@ -482,6 +609,8 @@ export function subscribeToAllDirectMessages(
         // Filter to only messages involving this user
         const myMessages = allMessages.filter(m => m.fromId === currentUserId || m.toId === currentUserId);
         callback(myMessages);
+    }, (error) => {
+        console.error("Error subscribing to all direct messages:", error);
     });
 }
 
@@ -498,7 +627,8 @@ export async function markDirectMessagesRead(
     const batch = writeBatch(db);
     snapshot.docs.forEach(d => {
         const msg = d.data() as DirectMessage;
-        if (!msg.readBy.includes(currentUserId)) {
+        // Check if message is not read and user is NOT the sender (usually you read your own messages implicitly, but standard param is 'readBy')
+        if (!msg.readBy.includes(currentUserId) && msg.fromId !== currentUserId) {
             batch.update(d.ref, { readBy: arrayUnion(currentUserId) });
         }
     });
@@ -514,11 +644,14 @@ export async function submitChangeRequest(projectId: string, request: Transcript
 export function subscribeToChangeRequests(projectId: string, callback: (requests: TranscriptChangeRequest[]) => void): Unsubscribe {
     const q = query(
         collection(db, 'projects', projectId, 'changeRequests'),
-        orderBy('timestamp', 'desc')
+        orderBy('timestamp', 'desc'),
+        limit(100)
     );
     return onSnapshot(q, (snapshot) => {
         const requests = snapshot.docs.map(d => d.data() as TranscriptChangeRequest);
         callback(requests);
+    }, (error) => {
+        console.error("Error subscribing to change requests:", error);
     });
 }
 
@@ -564,4 +697,180 @@ export async function getCodeHistory(projectId: string, codeId: string): Promise
     );
     const snap = await getDocs(q);
     return snap.docs.map(d => d.data() as CodeHistoryEntry);
+}
+
+// ─── Codebook Change Proposals ───
+
+export async function submitProposal(projectId: string, proposal: CodebookChangeProposal): Promise<void> {
+    await setDoc(doc(db, 'projects', projectId, 'proposals', proposal.id), proposal);
+}
+
+export function subscribeToProposals(projectId: string, callback: (proposals: CodebookChangeProposal[]) => void): Unsubscribe {
+    const q = query(
+        collection(db, 'projects', projectId, 'proposals'),
+        orderBy('timestamp', 'desc'),
+        limit(200)
+    );
+    return onSnapshot(q, (snapshot) => {
+        const proposals = snapshot.docs.map(d => d.data() as CodebookChangeProposal);
+        callback(proposals);
+    }, (error) => {
+        console.error("Error subscribing to proposals:", error);
+    });
+}
+
+export async function reviewProposal(
+    projectId: string,
+    proposalId: string,
+    status: 'accepted' | 'rejected',
+    reviewerId: string,
+    reviewerName: string,
+    rejectionReason?: string
+): Promise<void> {
+    const ref = doc(db, 'projects', projectId, 'proposals', proposalId);
+    const updates: Record<string, any> = {
+        status,
+        reviewedBy: reviewerId,
+        reviewedByName: reviewerName,
+        reviewedAt: Date.now()
+    };
+    if (rejectionReason) updates.rejectionReason = rejectionReason;
+    await updateDoc(ref, updates);
+}
+
+// ─── Notifications ───
+
+export async function sendNotification(projectId: string, notification: AppNotification): Promise<void> {
+    await setDoc(doc(db, 'projects', projectId, 'notifications', notification.id), notification);
+}
+
+export function subscribeToNotifications(
+    projectId: string,
+    currentUserId: string,
+    callback: (notifications: AppNotification[]) => void
+): Unsubscribe {
+    const q = query(
+        collection(db, 'projects', projectId, 'notifications'),
+        orderBy('timestamp', 'desc'),
+        limit(100)
+    );
+    return onSnapshot(q, (snapshot) => {
+        const allNotifs = snapshot.docs.map(d => d.data() as AppNotification);
+        // Filter: show if targetUserIds is empty (everyone) or includes current user
+        const myNotifs = allNotifs.filter(n =>
+            n.targetUserIds.length === 0 || n.targetUserIds.includes(currentUserId)
+        );
+        callback(myNotifs);
+    }, (error) => {
+        console.error("Error subscribing to notifications:", error);
+    });
+}
+
+export async function markNotificationRead(projectId: string, notificationId: string, userId: string): Promise<void> {
+    const ref = doc(db, 'projects', projectId, 'notifications', notificationId);
+    await updateDoc(ref, { readBy: arrayUnion(userId) });
+}
+
+export async function respondToNotification(
+    projectId: string,
+    notificationId: string,
+    userId: string,
+    response: 'accepted' | 'rejected',
+    rejectionReason?: string
+): Promise<void> {
+    const ref = doc(db, 'projects', projectId, 'notifications', notificationId);
+    const updates: Record<string, any> = {
+        [`responses.${userId}`]: response,
+        readBy: arrayUnion(userId)
+    };
+    if (rejectionReason) updates.rejectionReason = rejectionReason;
+    await updateDoc(ref, updates);
+}
+
+// ─── Document Snapshots (Version History) ───
+
+export async function saveDocumentSnapshot(projectId: string, snapshot: DocumentSnapshot): Promise<void> {
+    await setDoc(doc(db, 'projects', projectId, 'documentSnapshots', snapshot.id), snapshot);
+}
+
+export async function getDocumentSnapshots(projectId: string, transcriptId: string): Promise<DocumentSnapshot[]> {
+    // Note: To avoid requiring a composite index (transcriptId + timestamp),
+    // we query by equality first, then sort in memory. 
+    // Snapshots per transcript are usually few enough (<100) for this to be efficient.
+    const q = query(
+        collection(db, 'projects', projectId, 'documentSnapshots'),
+        where('transcriptId', '==', transcriptId)
+    );
+    const snap = await getDocs(q);
+    const docs = snap.docs.map(d => d.data() as DocumentSnapshot);
+    // Sort descending by timestamp
+    return docs.sort((a, b) => b.timestamp - a.timestamp).slice(0, 50);
+}
+
+export async function getAllDocumentSnapshots(projectId: string): Promise<DocumentSnapshot[]> {
+    const q = query(
+        collection(db, 'projects', projectId, 'documentSnapshots'),
+        orderBy('timestamp', 'desc'),
+        limit(200)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map(d => d.data() as DocumentSnapshot);
+}
+
+// ─── Activity Log ───
+
+export async function logVersionControlEvent(projectId: string, event: VersionControlEvent): Promise<void> {
+    await setDoc(doc(db, 'projects', projectId, 'activityLog', event.id), event);
+}
+
+export async function getActivityLog(projectId: string, limitNum = 100): Promise<VersionControlEvent[]> {
+    const q = query(
+        collection(db, 'projects', projectId, 'activityLog'),
+        orderBy('timestamp', 'desc'),
+        limit(limitNum)
+    );
+    const snap = await getDocs(q);
+    return snap.docs.map(d => d.data() as VersionControlEvent);
+}
+
+export function subscribeToActivityLog(projectId: string, callback: (events: VersionControlEvent[]) => void): Unsubscribe {
+    const q = query(
+        collection(db, 'projects', projectId, 'activityLog'),
+        orderBy('timestamp', 'desc'),
+        limit(100)
+    );
+    return onSnapshot(q, (snapshot) => {
+        const events = snapshot.docs.map(d => d.data() as VersionControlEvent);
+        callback(events);
+    }, (error) => {
+        console.error("Error subscribing to activity log:", error);
+    });
+}
+
+// ─── Enhanced Change Request (with rejection reason) ───
+
+export async function handleChangeRequestWithFeedback(
+    projectId: string,
+    requestId: string,
+    status: 'accepted' | 'rejected',
+    transcriptId?: string,
+    newContent?: string,
+    rejectionReason?: string,
+    reviewerId?: string,
+    reviewerName?: string
+): Promise<void> {
+    const batch = writeBatch(db);
+    const requestRef = doc(db, 'projects', projectId, 'changeRequests', requestId);
+    const updates: Record<string, any> = { status };
+    if (rejectionReason) updates.rejectionReason = rejectionReason;
+    if (reviewerId) updates.reviewedBy = reviewerId;
+    if (reviewerName) updates.reviewedByName = reviewerName;
+
+    batch.update(requestRef, updates);
+
+    if (status === 'accepted' && transcriptId && newContent) {
+        const transcriptRef = doc(db, 'projects', projectId, 'transcripts', transcriptId);
+        batch.update(transcriptRef, { content: newContent });
+    }
+    await batch.commit();
 }

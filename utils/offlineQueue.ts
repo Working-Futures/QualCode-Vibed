@@ -1,10 +1,11 @@
-import { CloudProject, UserProjectData, Code } from '../types';
-import { saveCodes, saveUserProjectData, updateCloudProject } from '../services/firestoreService';
+import { CloudProject, UserProjectData, Code, StickyNote } from '../types';
+import { saveCodes, saveUserProjectData, updateCloudProject, addStickyNote as firestoreAddStickyNote } from '../services/firestoreService';
 
 export type QueueItem =
     | { type: 'save_codes'; projectId: string; codes: Code[] }
     | { type: 'save_user_data'; projectId: string; userId: string; data: UserProjectData }
-    | { type: 'update_project'; projectId: string; updates: Partial<CloudProject> };
+    | { type: 'update_project'; projectId: string; updates: Partial<CloudProject> }
+    | { type: 'save_sticky_note'; projectId: string; note: StickyNote };
 
 const QUEUE_KEY = 'offline_changes_queue';
 
@@ -27,6 +28,8 @@ export const addToQueue = (item: QueueItem) => {
     } else if (item.type === 'update_project') {
         // For project updates, we might want to merge updates ideally, but replacing is safer for now if specific fields
         newQueue = newQueue.filter(i => !(i.type === 'update_project' && i.projectId === item.projectId));
+    } else if (item.type === 'save_sticky_note') {
+        newQueue = newQueue.filter(i => !(i.type === 'save_sticky_note' && i.projectId === item.projectId && i.note.id === item.note.id));
     }
 
     newQueue.push(item);
@@ -56,6 +59,8 @@ export const processQueue = async (): Promise<boolean> => {
                 await saveUserProjectData(item.projectId, item.userId, item.data);
             } else if (item.type === 'update_project') {
                 await updateCloudProject(item.projectId, item.updates);
+            } else if (item.type === 'save_sticky_note') {
+                await firestoreAddStickyNote(item.projectId, item.note);
             }
         } catch (e) {
             console.error("Failed to process queue item", item, e);

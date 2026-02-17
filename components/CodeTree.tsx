@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Code } from '../types';
-import { ChevronRight, ChevronDown, Move } from 'lucide-react';
+import { ChevronRight, ChevronDown, Move, Eye } from 'lucide-react';
 
 interface CodeTreeProps {
   codes: Code[];
@@ -10,6 +10,9 @@ interface CodeTreeProps {
   onDeleteCode: (id: string) => void;
   onMergeCode: (sourceId: string, targetId: string) => void;
   searchQuery?: string;
+  onConfirm: (title: string, message: string, callback: () => void) => void;
+  hiddenCodeIds?: Set<string>;
+  onToggleVisibility?: (codeId: string) => void;
 }
 
 interface TreeNode extends Code {
@@ -24,7 +27,10 @@ export const CodeTree: React.FC<CodeTreeProps> = ({
   onUpdateCode,
   onDeleteCode,
   onMergeCode,
-  searchQuery = ''
+  searchQuery = '',
+  onConfirm,
+  hiddenCodeIds,
+  onToggleVisibility
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, codeId: string } | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
@@ -146,10 +152,10 @@ export const CodeTree: React.FC<CodeTreeProps> = ({
     if (targetId === sourceCodeId) return;
 
     if (isMergeMode) {
-      if (confirm(`Merge into "${codes.find(c => c.id === targetId)?.name}"?`)) {
+      onConfirm('Confirm Merge', `Merge into "${codes.find(c => c.id === targetId)?.name}"?`, () => {
         onMergeCode(sourceCodeId, targetId);
         resetModes();
-      }
+      });
     } else if (isMoveMode) {
       onUpdateCode(sourceCodeId, { parentId: targetId });
       setExpandedIds(prev => new Set(prev).add(targetId));
@@ -203,9 +209,9 @@ export const CodeTree: React.FC<CodeTreeProps> = ({
               setDropTargetId(null);
               const draggedId = e.dataTransfer.getData('codeId');
               if (draggedId && draggedId !== node.id) {
-                if (confirm(`Merge "${codes.find(c => c.id === draggedId)?.name}" into "${node.name}"?`)) {
+                onConfirm('Confirm Merge', `Merge "${codes.find(c => c.id === draggedId)?.name}" into "${node.name}"?`, () => {
                   onMergeCode(draggedId, node.id);
-                }
+                });
               }
             }}
             onClick={(e) => {
@@ -229,6 +235,26 @@ export const CodeTree: React.FC<CodeTreeProps> = ({
 
             <div className="w-3 h-3 rounded-full flex-shrink-0 mr-1" style={{ backgroundColor: node.color }} />
 
+            {/* Visibility Output */}
+            {onToggleVisibility && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onToggleVisibility(node.id); }}
+                className={`w-4 h-4 flex items-center justify-center mr-1 text-[var(--text-muted)] hover:text-[var(--text-main)] ${hiddenCodeIds?.has(node.id) ? 'opacity-50' : ''}`}
+                title={hiddenCodeIds?.has(node.id) ? "Show highlights" : "Hide highlights"}
+              >
+                {hiddenCodeIds?.has(node.id) ? (
+                  <div className="relative">
+                    <Eye size={12} />
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="w-full h-px bg-red-500 transform rotate-45"></div>
+                    </div>
+                  </div>
+                ) : (
+                  <Eye size={12} />
+                )}
+              </button>
+            )}
+
             {isEditing ? (
               <input
                 autoFocus
@@ -240,7 +266,19 @@ export const CodeTree: React.FC<CodeTreeProps> = ({
                 className="w-full p-0 px-1 text-sm border rounded text-[var(--text-main)] bg-[var(--bg-panel)]"
               />
             ) : (
-              <span className="truncate">{node.name}</span>
+              <span className="truncate flex items-center gap-1">
+                {node.name}
+                {node.type && node.type !== 'personal' && (
+                  <span className={`text-[8px] font-bold px-1 py-0 rounded-sm uppercase leading-tight flex-shrink-0 ${node.type === 'master' ? 'bg-blue-100 text-blue-600' :
+                    node.type === 'suggested' ? 'bg-amber-100 text-amber-600' : ''
+                    }`}>
+                    {node.type === 'master' ? 'M' : node.type === 'suggested' ? 'S' : ''}
+                  </span>
+                )}
+                {node.type === 'personal' && (
+                  <span className="text-[8px] font-bold px-1 py-0 rounded-sm uppercase leading-tight flex-shrink-0 bg-green-100 text-green-600">P</span>
+                )}
+              </span>
             )}
           </div>
         </div>

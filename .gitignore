@@ -139,3 +139,9 @@ firestore-debug.log
 
 # Gemini agent artifacts (not project code)
 .gemini/
+
+# Backup and temporary files
+*~
+*.bak
+*.tmp
+

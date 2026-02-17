@@ -1,6 +1,10 @@
-import React, { useRef, useEffect, useCallback, memo, useState } from 'react';
+import React, { useRef, useEffect, useCallback, memo, useState, useLayoutEffect } from 'react';
 import { Transcript, Code, Selection, AppSettings, StickyNote } from '../types';
 import { Trash2, MessageSquare, Sparkles, X, Save, Plus, CornerDownLeft, AlertTriangle, ArrowDown, ArrowUp, StickyNote as StickyNoteIcon } from 'lucide-react';
+
+
+import { TranscriptNoteLayer, TranscriptNoteLayerHandle } from './TranscriptNoteLayer';
+import { restoreHighlights, stripHighlights } from '../utils/highlightUtils';
 
 interface EditorProps {
   activeTranscript: Transcript | null;
@@ -28,7 +32,14 @@ interface EditorProps {
   onUpdateStickyNote?: (id: string, updates: Partial<StickyNote>) => void;
   onDeleteStickyNote?: (id: string) => void;
   showTeamNotes?: boolean;
+  showStickyBoard?: boolean;
+  onCloseStickyBoard?: () => void;
   currentUserId?: string;
+  projectId?: string;
+  codebookFilter?: 'all' | 'master' | 'personal';
+  onAlert: (title: string, message: string) => void;
+  onConfirm: (title: string, message: string, onConfirm: () => void) => void;
+  hiddenCodeIds?: Set<string>;
 }
 
 interface EditableLine {
@@ -56,12 +67,23 @@ export const Editor = memo<EditorProps>(({
   onUpdateStickyNote,
   onDeleteStickyNote,
   showTeamNotes = false,
+  showStickyBoard = false,
+  onCloseStickyBoard,
   currentUserId,
   readOnly = false,
-  canEditDirectly = true // Default to true for backward compatibility
+  canEditDirectly = true, // Default to true for backward compatibility
+  projectId,
+  codebookFilter = 'all',
+  onAlert,
+  onConfirm,
+  hiddenCodeIds
 }) => {
   // Viewing Mode Refs
+
+
   const contentRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const noteLayerRef = useRef<TranscriptNoteLayerHandle>(null);
 
   // ... (rest of existing state)
 
@@ -74,28 +96,8 @@ export const Editor = memo<EditorProps>(({
   };
 
   const handleTranscriptDoubleClick = (e: React.MouseEvent) => {
-    if (isEditing || !onAddStickyNote || !activeTranscript || !contentRef.current || !currentUserId) return;
-
-    // Prevent default selection behavior
-    e.preventDefault();
-
-    const rect = contentRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
-
-    const newNote: StickyNote = {
-      id: crypto.randomUUID(),
-      transcriptId: activeTranscript.id,
-      content: 'New Note',
-      authorId: currentUserId,
-      authorName: 'Me', // This should typically come from user profile, but 'Me' is a safe fallback for local display until sync
-      color: '#fef3c7', // Default yellow
-      x,
-      y,
-      timestamp: Date.now()
-    };
-
-    onAddStickyNote(newNote);
+    // Note creation moved to distinct button to prevent accidental creation
+    // Double click can be reserved for other actions if needed
   };
 
   // ... (rest of existing logic)
@@ -110,8 +112,10 @@ export const Editor = memo<EditorProps>(({
   const [contextMenu, setContextMenu] = useState<{ x: number, y: number, id: string, text?: string } | null>(null);
   const [annotationInput, setAnnotationInput] = useState<string>('');
   const [showAnnotationInput, setShowAnnotationInput] = useState(false);
-  const [inVivoSelection, setInVivoSelection] = useState<{ text: string, transcriptId: string } | null>(null);
+  const [inVivoSelection, setInVivoSelection] = useState<{ text: string, transcriptId: string, range: Range } | null>(null);
+  const [inVivoFilter, setInVivoFilter] = useState('');
   const [focusedCodeId, setFocusedCodeId] = useState<string | null>(null);
+  const [focusedSelectionId, setFocusedSelectionId] = useState<string | null>(null);
 
   interface SearchMatch {
     id: string; // lineIndex-matchIndex
@@ -132,10 +136,15 @@ export const Editor = memo<EditorProps>(({
   const [foundMatches, setFoundMatches] = useState<SearchMatch[]>([]);
   const [selectedMatches, setSelectedMatches] = useState<Set<string>>(new Set());
   const [fuzzyThreshold, setFuzzyThreshold] = useState(2);
-  const [codebookFilter, setCodebookFilter] = useState<'all' | 'master' | 'personal'>('all');
 
   const visibleCodes = React.useMemo(() => {
+    // We no longer filter out hidden codes here so that gutter markers persist.
+    // Hiding highlights is handled in the rendering effect (applying .hidden-highlight class).
+
     if (codebookFilter === 'all') return codes;
+
+    // Master view includes suggested codes
+    if (codebookFilter === 'master') return codes.filter(c => (c.type === 'master' || c.type === 'suggested'));
     return codes.filter(c => (c.type || 'personal') === codebookFilter);
   }, [codes, codebookFilter]);
 
@@ -295,20 +304,35 @@ export const Editor = memo<EditorProps>(({
       const div = document.createElement('div');
       div.innerHTML = activeTranscript.content;
 
+      // START FIX: Clean artifacts before parsing text
+      div.querySelectorAll('.line-codes-gutter, .line-annotation-gutter').forEach(el => el.remove());
+      // END FIX
+
+
       const lines = Array.from(div.querySelectorAll('.transcript-line'));
 
       if (lines.length > 0) {
-        setEditableLines(lines.map(l => ({
-          id: crypto.randomUUID(),
-          content: l.textContent || ''
-        })));
+        setEditableLines(lines.map(l => {
+          let content = l.textContent || '';
+          // FIX: Remove gutter text artifacts if present (e.g. "{ New Code") which can occur if styles were missing or content was flattened
+          content = content.replace(/^(\s*\{\s+[^{}]+\s*)+/g, '').trimStart();
+          return {
+            id: crypto.randomUUID(),
+            content
+          };
+        }));
       } else {
         // Fallback for raw text without structure
         const rawLines = (div.textContent || '').split('\n').filter(l => l.trim());
-        setEditableLines(rawLines.map(l => ({
-          id: crypto.randomUUID(),
-          content: l
-        })));
+        setEditableLines(rawLines.map(l => {
+          let content = l;
+          // FIX: Remove gutter text artifacts here too
+          content = content.replace(/^(\s*\{\s+[^{}]+\s*)+/g, '').trimStart();
+          return {
+            id: crypto.randomUUID(),
+            content
+          };
+        }));
       }
       isFirstRender.current = true; // Reset on entry to edit mode
       lastInitId.current = activeTranscript.id;
@@ -376,18 +400,25 @@ export const Editor = memo<EditorProps>(({
     return () => clearTimeout(timer);
   }, [editableLines, isEditing, onAutoSave, generateHtmlContent]);
 
+  // Auto-resize all textareas when entering edit mode or when lines change
+  useLayoutEffect(() => {
+    if (isEditing) {
+      lineRefs.current.forEach(el => {
+        if (el) {
+          el.style.height = 'auto';
+          el.style.height = el.scrollHeight + 'px';
+        }
+      });
+    }
+  }, [isEditing, editableLines, settings]);
+
   // Handle Editing Actions
   const handleLineChange = (index: number, val: string) => {
     const newLines = [...editableLines];
     newLines[index].content = val;
     setEditableLines(newLines);
 
-    // Auto-resize height
-    const el = lineRefs.current[index];
-    if (el) {
-      el.style.height = 'auto';
-      el.style.height = el.scrollHeight + 'px';
-    }
+    // Auto-resize handled by useLayoutEffect now
   };
 
   const handleLineKeyDown = (e: React.KeyboardEvent, index: number) => {
@@ -442,13 +473,39 @@ export const Editor = memo<EditorProps>(({
     onSaveContent(generateHtmlContent());
   };
 
+  const applyZebraStriping = useCallback(() => {
+    if (!contentRef.current) return;
+
+    if (settings.zebraStriping) {
+      contentRef.current.classList.add('zebra-active');
+      const lines = contentRef.current.querySelectorAll('.transcript-line');
+      lines.forEach((line, index) => {
+        if (index % 2 === 0) line.classList.add('zebra-row-odd');
+        else line.classList.remove('zebra-row-odd');
+      });
+    } else {
+      contentRef.current.classList.remove('zebra-active');
+      const lines = contentRef.current.querySelectorAll('.transcript-line');
+      lines.forEach(line => line.classList.remove('zebra-row-odd'));
+    }
+  }, [settings.zebraStriping]);
+
   // --- Viewer Mode Effects ---
   useEffect(() => {
     if (!isEditing && contentRef.current && activeTranscript) {
-      contentRef.current.innerHTML = activeTranscript.content;
+      // Start with clean content, then re-apply highlights from selections
+      let html = stripHighlights(activeTranscript.content);
+      const transcriptSelections = (selections || []).filter(s => s.transcriptId === activeTranscript.id);
+      if (transcriptSelections.length > 0) {
+        html = restoreHighlights(html, transcriptSelections, visibleCodes);
+      }
+      contentRef.current.innerHTML = html;
       updateGutterMarkers();
+      applyZebraStriping(); // Re-apply striping immediately after content update
     }
-  }, [activeTranscript?.id, activeTranscript?.content, isEditing]);
+  }, [activeTranscript?.id, activeTranscript?.content, isEditing, selections, visibleCodes, settings.zebraStriping]);
+
+
 
   // Apply Styles & Focused Code Logic (Viewer Only)
   useEffect(() => {
@@ -469,24 +526,32 @@ export const Editor = memo<EditorProps>(({
         contentRef.current.style.fontFamily = 'inherit';
       }
 
-      if (settings.zebraStriping) {
-        contentRef.current.classList.add('zebra-active');
-      } else {
-        contentRef.current.classList.remove('zebra-active');
-      }
+      applyZebraStriping();
 
-      // Apply Focus Filter
-      if (focusedCodeId) {
+      // Apply Focus Filter & Visibility
+      if (focusedCodeId || focusedSelectionId) {
         contentRef.current.classList.add('filtering-active');
         const allSegments = contentRef.current.querySelectorAll('.coded-segment');
         allSegments.forEach((el) => {
           const span = el as HTMLElement;
-          if (span.dataset.codeId === focusedCodeId) {
+          const codeId = span.dataset.codeId;
+
+          const isMatch = focusedCodeId
+            ? codeId === focusedCodeId
+            : span.dataset.selectionId === focusedSelectionId;
+
+          // Remove any previous classes
+          span.classList.remove('focused-segment', 'dimmed-segment', 'hidden-highlight');
+
+          if (isMatch) {
             span.classList.add('focused-segment');
-            span.classList.remove('dimmed-segment');
           } else {
             span.classList.add('dimmed-segment');
-            span.classList.remove('focused-segment');
+          }
+
+          // Apply hidden state regardless of focus
+          if (codeId && hiddenCodeIds?.has(codeId)) {
+            span.classList.add('hidden-highlight');
           }
         });
       } else {
@@ -494,11 +559,18 @@ export const Editor = memo<EditorProps>(({
         const allSegments = contentRef.current.querySelectorAll('.coded-segment');
         allSegments.forEach((el) => {
           const span = el as HTMLElement;
-          span.classList.remove('focused-segment', 'dimmed-segment');
+          const codeId = span.dataset.codeId;
+
+          span.classList.remove('focused-segment', 'dimmed-segment', 'hidden-highlight');
+
+          // Apply hidden state
+          if (codeId && hiddenCodeIds?.has(codeId)) {
+            span.classList.add('hidden-highlight');
+          }
         });
       }
     }
-  }, [settings, focusedCodeId, activeTranscript?.id, isEditing]);
+  }, [settings, focusedCodeId, focusedSelectionId, activeTranscript?.id, activeTranscript?.content, isEditing, applyZebraStriping, hiddenCodeIds]);
 
   // Keyboard Shortcuts (Save)
   useEffect(() => {
@@ -517,12 +589,59 @@ export const Editor = memo<EditorProps>(({
   }, [onSaveProject, isEditing, editableLines]); // Depends on editableLines for save
 
   const getGlobalOffsets = (root: HTMLElement, range: Range) => {
-    const preCaretRange = range.cloneRange();
-    preCaretRange.selectNodeContents(root);
-    preCaretRange.setEnd(range.startContainer, range.startOffset);
-    const start = preCaretRange.toString().length;
-    const end = start + range.toString().length;
-    return { start, end };
+    // Traverse all text nodes up to the start point, IGNORING gutter elements
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (node) => {
+        // Check if node is inside a gutter
+        let p = node.parentElement;
+        while (p && p !== root) {
+          if (p.classList.contains('line-codes-gutter') || p.classList.contains('line-annotation-gutter')) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          p = p.parentElement;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+
+    let start = 0;
+    let foundStart = false;
+    let currentNode = walker.nextNode();
+
+    while (currentNode) {
+      if (currentNode === range.startContainer) {
+        start += range.startOffset;
+        foundStart = true;
+        break;
+      }
+      start += (currentNode.textContent || '').length;
+      currentNode = walker.nextNode();
+    }
+
+    // Now calculate the length of the selection itself
+    let length = 0;
+    if (foundStart) {
+      // If start and end are in the same node
+      if (range.startContainer === range.endContainer) {
+        length = range.endOffset - range.startOffset;
+      } else {
+        // Start node part
+        length += (range.startContainer.textContent || '').length - range.startOffset;
+
+        // Intermediate nodes
+        currentNode = walker.nextNode();
+        while (currentNode) {
+          if (currentNode === range.endContainer) {
+            length += range.endOffset;
+            break;
+          }
+          length += (currentNode.textContent || '').length;
+          currentNode = walker.nextNode();
+        }
+      }
+    }
+
+    return { start, end: start + length };
   };
 
   const highlightSafe = (range: Range, code: Code, selId: string): boolean => {
@@ -533,7 +652,17 @@ export const Editor = memo<EditorProps>(({
       root,
       NodeFilter.SHOW_TEXT,
       {
-        acceptNode: (node) => range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+        acceptNode: (node) => {
+          // Check if node is inside a gutter
+          let p = node.parentElement;
+          while (p && p !== root) {
+            if (p.classList.contains('line-codes-gutter') || p.classList.contains('line-annotation-gutter')) {
+              return NodeFilter.FILTER_REJECT;
+            }
+            p = p.parentElement;
+          }
+          return range.intersectsNode(node) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
       }
     );
 
@@ -597,39 +726,41 @@ export const Editor = memo<EditorProps>(({
       if (existingAnnotations) existingAnnotations.remove();
 
       const codeSpans = line.querySelectorAll('.coded-segment');
-      const uniqueCodes = new Set<string>();
+      const uniqueSelIds = new Set<string>();
       const annotationsForLine: { codeName: string; codeColor: string; annotation: string }[] = [];
 
       codeSpans.forEach(span => {
         const el = span as HTMLElement;
-        const codeId = el.dataset.codeId;
         const selId = el.dataset.selectionId;
-        if (codeId) uniqueCodes.add(codeId);
+        if (selId) uniqueSelIds.add(selId);
 
         // Check if this selection has an annotation
         if (selId) {
           const sel = selections.find(s => s.id === selId);
-          if (sel?.annotation) {
-            if (sel?.annotation) {
-              const code = visibleCodes.find(c => c.id === codeId);
-              if (code) {
-                annotationsForLine.push({
-                  codeName: code.name,
-                  codeColor: code.color,
-                  annotation: sel.annotation
-                });
-              }
+          if (sel?.annotation && !annotationsForLine.some(a => a.annotation === sel.annotation)) { // Check for duplicates
+            const codeId = el.dataset.codeId;
+            const code = visibleCodes.find(c => c.id === codeId);
+            if (code) {
+              annotationsForLine.push({
+                codeName: code.name,
+                codeColor: code.color,
+                annotation: sel.annotation
+              });
             }
           }
         }
       });
 
-      if (uniqueCodes.size > 0) {
+      if (uniqueSelIds.size > 0) {
         const gutter = document.createElement('div');
         gutter.className = 'line-codes-gutter';
+        gutter.setAttribute('contenteditable', 'false');
+        gutter.style.userSelect = 'none';
 
-        uniqueCodes.forEach(codeId => {
-          const code = visibleCodes.find(c => c.id === codeId);
+        uniqueSelIds.forEach(selId => {
+          const sel = selections.find(s => s.id === selId);
+          if (!sel) return;
+          const code = visibleCodes.find(c => c.id === sel.codeId);
           if (code) {
             const marker = document.createElement('div');
             marker.className = 'gutter-marker cursor-pointer hover:scale-105 transition-transform';
@@ -637,7 +768,8 @@ export const Editor = memo<EditorProps>(({
             marker.innerHTML = `<span class="bracket">{</span> <span class="label">${code.name}</span>`;
             marker.onclick = (e) => {
               e.stopPropagation();
-              setFocusedCodeId(prev => prev === codeId ? null : codeId);
+              setFocusedSelectionId(prev => prev === selId ? null : selId);
+              setFocusedCodeId(null); // Clear code focus
             };
             gutter.appendChild(marker);
           }
@@ -649,6 +781,8 @@ export const Editor = memo<EditorProps>(({
       if (annotationsForLine.length > 0) {
         const annotationGutter = document.createElement('div');
         annotationGutter.className = 'line-annotation-gutter';
+        annotationGutter.setAttribute('contenteditable', 'false');
+        annotationGutter.style.userSelect = 'none';
 
         annotationsForLine.forEach(({ codeName, codeColor, annotation }) => {
           const bubble = document.createElement('div');
@@ -664,7 +798,7 @@ export const Editor = memo<EditorProps>(({
   };
 
   const handleMouseUp = useCallback(() => {
-    if (isEditing || !activeCode || !activeTranscript || !contentRef.current) return;
+    if (isEditing || readOnly || !activeCode || !activeTranscript || !contentRef.current) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed) return;
 
@@ -690,7 +824,10 @@ export const Editor = memo<EditorProps>(({
           timestamp: Date.now()
         };
 
-        const updatedHtml = contentRef.current.innerHTML;
+        // Create a cleaner version of HTML without gutters for storage
+        const clone = contentRef.current.cloneNode(true) as HTMLElement;
+        clone.querySelectorAll('.line-codes-gutter, .line-annotation-gutter').forEach(el => el.remove());
+        const updatedHtml = clone.innerHTML;
         onSelectionCreate(newSelection, updatedHtml);
         updateGutterMarkers();
       }
@@ -698,10 +835,12 @@ export const Editor = memo<EditorProps>(({
     } catch (e) {
       console.error(e);
     }
-  }, [activeCode, activeTranscript, onSelectionCreate, isEditing]);
+  }, [activeCode, activeTranscript, onSelectionCreate, isEditing, readOnly]);
 
   const handleClick = (e: React.MouseEvent) => {
     if (isEditing) return;
+    // In read-only mode, don't show the context menu for coded segments
+    if (readOnly) return;
 
     // If clicking outside a marker or code, clear focus
     const target = e.target as HTMLElement;
@@ -709,8 +848,9 @@ export const Editor = memo<EditorProps>(({
     const isCode = target.closest('.coded-segment');
 
     if (!isMarker) {
-      if (!isCode && focusedCodeId) {
+      if (!isCode && (focusedCodeId || focusedSelectionId)) {
         setFocusedCodeId(null);
+        setFocusedSelectionId(null);
       }
     }
 
@@ -730,14 +870,16 @@ export const Editor = memo<EditorProps>(({
   };
 
   const removeHighlight = () => {
-    if (!contextMenu || !contentRef.current) return;
+    if (readOnly || !contextMenu || !contentRef.current) return;
     const spans = contentRef.current.querySelectorAll(`span[data-selection-id="${contextMenu.id}"]`);
     spans.forEach(span => {
       const text = document.createTextNode(span.textContent || '');
       span.parentNode?.replaceChild(text, span);
     });
     contentRef.current.normalize();
-    onSelectionDelete(contextMenu.id, contentRef.current.innerHTML);
+    const clone = contentRef.current.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll('.line-codes-gutter, .line-annotation-gutter').forEach(el => el.remove());
+    onSelectionDelete(contextMenu.id, clone.innerHTML);
     updateGutterMarkers();
     setContextMenu(null);
     setShowAnnotationInput(false);
@@ -751,13 +893,15 @@ export const Editor = memo<EditorProps>(({
   };
 
   const handleContextMenuEvent = (e: React.MouseEvent) => {
-    if (!activeTranscript || isEditing) return;
+    if (!activeTranscript || isEditing || readOnly) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed) return;
     const text = selection.toString().trim();
     if (text && text.length > 0 && text.length < 80) {
       e.preventDefault();
-      setInVivoSelection({ text, transcriptId: activeTranscript.id });
+      const range = selection.getRangeAt(0).cloneRange();
+      setInVivoSelection({ text, transcriptId: activeTranscript.id, range });
+      setInVivoFilter('');
     }
   };
 
@@ -776,7 +920,7 @@ export const Editor = memo<EditorProps>(({
               <AlertTriangle size={16} />
               <span className="text-sm font-bold">
                 {canEditDirectly
-                  ? "Editing Mode: Saving will reset all highlights."
+                  ? "Editing Mode: Codes on edited lines will be reset."
                   : "Suggestion Mode: Changes will be submitted for review."}
               </span>
             </div>
@@ -875,7 +1019,7 @@ export const Editor = memo<EditorProps>(({
         </div>
 
         {/* Flex Container for Sidebar + Editor */}
-        <div className="flex-1 flex overflow-hidden">
+        <div key="editor-content" className="flex-1 flex overflow-hidden">
 
           {/* Matches Sidebar */}
           {showFindReplace && foundMatches.length > 0 && (
@@ -931,34 +1075,49 @@ export const Editor = memo<EditorProps>(({
             </div>
           )}
 
-          {/* Main Editor Canvas */}
-          <div className="flex-1 overflow-auto p-8 font-mono text-sm bg-white" onClick={() => setShowFindReplace(false)}>
-            <div className="max-w-4xl mx-auto space-y-1 min-h-[500px] shadow-sm bg-white p-8 border border-gray-100 rounded-lg">
-              {editableLines.map((line, i) => (
-                <div key={line.id} className="flex gap-4 group mb-1">
-                  {/* Gutter / Line Number */}
-                  <div className="w-8 shrink-0 text-right text-xs text-slate-300 select-none pt-2 group-hover:text-slate-500 transition-colors font-mono">
-                    {i + 1}
-                  </div>
-
-                  {/* Content Cell */}
-                  <div className="flex-1 min-w-0 relative">
+          {/* Main Editor Canvas — mirrors viewer styling */}
+          <div className="flex-1 overflow-auto p-8 bg-[var(--bg-main)]" onClick={() => setShowFindReplace(false)}>
+            <div
+              className="transcript-content-wrapper mx-auto relative"
+              style={{ maxWidth: '850px' }}
+            >
+              <div
+                className={`transcript-content outline-none bg-[var(--bg-paper)] text-[var(--text-main)] shadow-xl min-h-[11in] ${settings.zebraStriping ? 'zebra-active' : ''}`}
+                style={{
+                  padding: '3rem 3rem 3rem 4rem',
+                  fontSize: `${settings.fontSize}px`,
+                  lineHeight: `${settings.lineHeight}`,
+                  letterSpacing: `${settings.charSpacing}px`,
+                  fontFamily: settings.fontFamily === 'dyslexic' ? 'OpenDyslexic, sans-serif' : 'inherit',
+                }}
+              >
+                {editableLines.map((line, i) => (
+                  <div
+                    key={line.id}
+                    className={`transcript-line group ${settings.zebraStriping && i % 2 === 0 ? 'zebra-row-odd' : ''}`}
+                    data-line={i + 1}
+                    style={{ padding: '4px 16px', position: 'relative' }}
+                  >
                     <textarea
                       ref={el => lineRefs.current[i] = el}
                       value={line.content}
                       onChange={(e) => handleLineChange(i, e.target.value)}
                       onKeyDown={(e) => handleLineKeyDown(e, i)}
-                      className="w-full bg-transparent border-b border-transparent hover:border-[var(--border)] focus:border-[var(--accent)] resize-none outline-none py-1 px-1 text-[var(--text-main)] transition-colors leading-relaxed"
+                      className="w-full bg-transparent resize-none outline-none text-[var(--text-main)] transition-colors border-b border-transparent focus:border-[var(--accent)] overflow-hidden"
                       style={{
-                        fontSize: `${settings.fontSize}px`,
+                        fontSize: 'inherit',
+                        lineHeight: 'inherit',
+                        letterSpacing: 'inherit',
+                        fontFamily: 'inherit',
                         minHeight: '1.8em',
-                        height: 'auto'
+                        height: 'auto',
+                        padding: '2px 0',
                       }}
                       rows={1}
                     />
                     {/* Line Controls (Insert) */}
                     <button
-                      className="absolute -right-6 top-1.5 opacity-0 group-hover:opacity-100 p-1 text-slate-300 hover:text-[var(--accent)] transition-all"
+                      className="absolute -right-6 top-1.5 opacity-0 group-hover:opacity-100 p-1 text-[var(--text-muted)] hover:text-[var(--accent)] transition-all"
                       title="Insert line below (Enter)"
                       onClick={() => {
                         const newLines = [...editableLines];
@@ -969,19 +1128,19 @@ export const Editor = memo<EditorProps>(({
                       <CornerDownLeft size={12} />
                     </button>
                   </div>
-                </div>
-              ))}
+                ))}
 
-              {/* Empty State / Add Line at end */}
-              <div
-                className="mt-4 flex gap-4 text-slate-300 hover:text-[var(--accent)] cursor-pointer group"
-                onClick={() => {
-                  setEditableLines([...editableLines, { id: crypto.randomUUID(), content: '' }]);
-                }}
-              >
-                <div className="w-8"></div>
-                <div className="flex items-center gap-2 text-sm italic border border-dashed border-slate-200 rounded px-4 py-2 w-full group-hover:border-[var(--accent)] transition-colors">
-                  <Plus size={14} /> Add new line
+                {/* Add Line at end */}
+                <div
+                  className="mt-2 text-[var(--text-muted)] hover:text-[var(--accent)] cursor-pointer group"
+                  style={{ padding: '4px 16px', marginLeft: '0' }}
+                  onClick={() => {
+                    setEditableLines([...editableLines, { id: crypto.randomUUID(), content: '' }]);
+                  }}
+                >
+                  <div className="flex items-center gap-2 text-sm italic border border-dashed border-[var(--border)] rounded px-4 py-2 group-hover:border-[var(--accent)] transition-colors">
+                    <Plus size={14} /> Add new line
+                  </div>
                 </div>
               </div>
             </div>
@@ -997,15 +1156,13 @@ export const Editor = memo<EditorProps>(({
       <div className="bg-[var(--bg-panel)] p-3 border-b border-[var(--border)] flex justify-between items-center shadow-sm z-10 shrink-0">
         <h2 className="font-bold text-[var(--text-main)]">{activeTranscript.name}</h2>
         <div className="flex items-center gap-4">
-          <select
-            value={codebookFilter}
-            onChange={(e) => setCodebookFilter(e.target.value as any)}
-            className="text-xs font-bold bg-[var(--bg-main)] border border-[var(--border)] rounded px-2 py-1 text-[var(--text-main)] outline-none focus:ring-1 focus:ring-[var(--accent)]"
+          <button
+            onClick={() => noteLayerRef.current?.addNote()}
+            className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold bg-amber-100 text-amber-900 rounded-full hover:bg-amber-200 transition-colors"
+            title="Add Sticky Note"
           >
-            <option value="all">All Codes</option>
-            <option value="master">Master Only</option>
-            <option value="personal">Personal Only</option>
-          </select>
+            <StickyNoteIcon size={14} /> Add Note
+          </button>
           {activeCode && (
             <div className="text-sm font-medium px-3 py-1 rounded bg-[var(--bg-main)] border border-[var(--border)] text-[var(--text-main)] flex items-center gap-2">
               <span className="w-3 h-3 rounded-full" style={{ backgroundColor: activeCode.color }} />
@@ -1016,69 +1173,55 @@ export const Editor = memo<EditorProps>(({
       </div>
 
       <div
+        key="viewer-content"
         className="flex-1 overflow-y-auto relative print:overflow-visible p-8"
         onMouseUp={handleMouseUp}
         onClick={handleClick}
         onContextMenu={handleContextMenuEvent}
       >
         {/* Filter Banner */}
-        {focusedCodeId && (
+        {(focusedCodeId || focusedSelectionId) && (
           <div className="absolute top-2 left-1/2 -translate-x-1/2 z-20 bg-slate-800 text-white px-3 py-1 rounded-full text-xs shadow-lg animate-in fade-in slide-in-from-top-2 flex items-center gap-2">
-            <span>Filtering by: <strong>{codes.find(c => c.id === focusedCodeId)?.name}</strong></span>
-            <button onClick={() => setFocusedCodeId(null)} className="hover:text-red-300"><X size={12} /></button>
+            {focusedCodeId ? (
+              <span>Filtering by: <strong>{codes.find(c => c.id === focusedCodeId)?.name}</strong></span>
+            ) : (
+              <span>Instance Selected</span>
+            )}
+            <button onClick={() => { setFocusedCodeId(null); setFocusedSelectionId(null); }} className="hover:text-red-300"><X size={12} /></button>
           </div>
         )}
 
         <div
-          ref={contentRef}
-          onDoubleClick={handleTranscriptDoubleClick}
-          className="transcript-content outline-none mx-auto bg-[var(--bg-paper)] text-[var(--text-main)] shadow-xl min-h-[11in] relative"
-          style={{
-            maxWidth: '850px',
-            padding: '3rem 3rem 3rem 13rem',
-            cursor: activeCode ? 'cell' : 'text'
-          }}
+          className="transcript-content-wrapper mx-auto relative"
+          style={{ maxWidth: '850px' }}
+          ref={wrapperRef}
         >
+          {/* Transcript content - managed imperatively via innerHTML, NO React children allowed */}
+          <div
+            ref={contentRef}
+            onDoubleClick={handleTranscriptDoubleClick}
+            className="transcript-content outline-none bg-[var(--bg-paper)] text-[var(--text-main)] shadow-xl min-h-[11in]"
+            style={{
+              padding: '3rem 3rem 3rem 13rem',
+              cursor: activeCode ? 'cell' : 'text'
+            }}
+          />
+
           {/* Sticky Notes Layer */}
-          {stickyNotes
-            .filter(n => n.transcriptId === activeTranscript.id)
-            .filter(n => showTeamNotes || n.authorId === currentUserId)
-            .map(note => (
-              <div
-                key={note.id}
-                className={`absolute z-10 w-40 p-2 shadow-lg rounded text-[var(--text-main)] border border-amber-300/50 transition-all group ${readOnly ? '' : 'hover:z-50'}`}
-                style={{
-                  left: `${note.x}%`,
-                  top: `${note.y}%`,
-                  backgroundColor: note.color || '#fef3c7',
-                  transform: 'translate(-50%, -50%)', // Centered on click
-                  fontFamily: 'cursive',
-                  fontSize: '0.85rem'
-                }}
-                onClick={(e) => e.stopPropagation()} // Prevent closing other things
-                onDoubleClick={(e) => e.stopPropagation()} // Prevent creating new note
-              >
-                <textarea
-                  className="w-full bg-transparent resize-none outline-none overflow-hidden"
-                  value={note.content}
-                  onChange={(e) => !readOnly && onUpdateStickyNote?.(note.id, { content: e.target.value })}
-                  rows={Math.max(2, note.content.split('\n').length)}
-                  placeholder="Note..."
-                  style={{ minHeight: '40px' }}
-                  readOnly={readOnly || note.authorId !== currentUserId}
-                />
-                <div className="flex justify-between items-center mt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <span className="text-[10px] text-slate-500 font-sans truncate max-w-[80px]">{note.authorName}</span>
-                  <button
-                    onClick={() => onDeleteStickyNote?.(note.id)}
-                    className="text-slate-400 hover:text-red-600 p-0.5 rounded"
-                    title="Delete Note"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              </div>
-            ))}
+          {projectId && (
+            <TranscriptNoteLayer
+              notes={stickyNotes}
+              projectId={projectId || ''}
+              currentUser={{ uid: currentUserId || '', displayName: currentUserId || 'User' }}
+              activeTranscriptId={activeTranscript?.id}
+              codebookFilter={codebookFilter}
+              showTeamNotes={showTeamNotes}
+              ref={noteLayerRef}
+              containerRef={contentRef}
+              readOnly={readOnly}
+              onConfirm={onConfirm}
+            />
+          )}
         </div>
       </div>
 
@@ -1131,41 +1274,108 @@ export const Editor = memo<EditorProps>(({
 
       {/* In-Vivo Coding Popup */}
       {
+
         inVivoSelection && (
           <>
             <div className="fixed inset-0 bg-black/20 z-50" onClick={() => setInVivoSelection(null)} />
-            <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-[var(--bg-panel)] rounded-xl shadow-2xl border border-[var(--border)] p-5 z-50 w-80">
-              <div className="flex items-center gap-2 mb-3">
-                <Sparkles size={16} className="text-amber-500" />
-                <h3 className="font-bold text-sm text-[var(--text-main)]">In-Vivo Code</h3>
-              </div>
-              <p className="text-xs text-[var(--text-muted)] mb-3">
-                Create a new code from selected text:
-              </p>
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4 text-sm font-medium text-amber-800 italic">
-                "{inVivoSelection.text}"
-              </div>
-              <div className="flex justify-end gap-2">
-                <button
-                  onClick={() => setInVivoSelection(null)}
-                  className="px-3 py-1.5 text-xs text-[var(--text-muted)] hover:bg-[var(--bg-main)] rounded"
-                >
-                  Cancel
-                </button>
+            <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-[var(--bg-panel)] rounded-xl shadow-2xl border border-[var(--border)] p-0 z-50 w-96 overflow-hidden flex flex-col max-h-[80vh]">
+              <div className="p-4 border-b border-[var(--border)] bg-[var(--bg-main)]">
+                <div className="flex items-center gap-2 mb-2">
+                  <Sparkles size={16} className="text-amber-500" />
+                  <h3 className="font-bold text-sm text-[var(--text-main)]">Coding Actions</h3>
+                </div>
+                <div className="bg-amber-50 border border-amber-200 rounded p-2 text-xs font-medium text-amber-800 italic mb-3 truncate">
+                  "{inVivoSelection.text}"
+                </div>
+
                 <button
                   onClick={() => {
                     onCreateInVivoCode?.(inVivoSelection.text, inVivoSelection.transcriptId);
                     setInVivoSelection(null);
                   }}
-                  className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded font-bold hover:bg-amber-600"
+                  className="w-full py-2 text-xs bg-amber-500 text-white rounded font-bold hover:bg-amber-600 flex items-center justify-center gap-1 shadow-sm transition-all"
                 >
-                  <Sparkles size={12} className="inline mr-1" /> Create Code
+                  <Sparkles size={12} /> Create New In-Vivo "{inVivoSelection.text}"
+                </button>
+              </div>
+
+              <div className="p-4 bg-[var(--bg-panel)] flex-1 overflow-hidden flex flex-col">
+                <div className="text-xs font-bold text-[var(--text-muted)] uppercase tracking-wider mb-2">Or format with existing code</div>
+                <input
+                  type="text"
+                  placeholder="Filter codes..."
+                  value={inVivoFilter}
+                  onChange={(e) => setInVivoFilter(e.target.value)}
+                  className="w-full p-2 mb-2 text-xs border border-[var(--border)] rounded bg-[var(--bg-main)] focus:ring-1 focus:ring-[var(--accent)] outline-none"
+                  autoFocus
+                />
+                <div className="overflow-y-auto flex-1 border border-[var(--border)] rounded bg-[var(--bg-main)] max-h-[200px]">
+                  {visibleCodes
+                    .filter(c => c.name.toLowerCase().includes(inVivoFilter.toLowerCase()))
+                    .map(code => (
+                      <button
+                        key={code.id}
+                        onClick={() => {
+                          if (!contentRef.current) return;
+
+                          // Apply highlight using the stored range
+                          try {
+                            const { start, end } = getGlobalOffsets(contentRef.current, inVivoSelection.range);
+                            const selId = crypto.randomUUID();
+                            const success = highlightSafe(inVivoSelection.range, code, selId);
+
+                            if (success) {
+                              const newSelection: Selection = {
+                                id: selId,
+                                codeId: code.id,
+                                transcriptId: inVivoSelection.transcriptId,
+                                text: inVivoSelection.text,
+                                startIndex: start,
+                                endIndex: end,
+                                timestamp: Date.now()
+                              };
+
+                              // Generate updated HTML
+                              const clone = contentRef.current.cloneNode(true) as HTMLElement;
+                              clone.querySelectorAll('.line-codes-gutter, .line-annotation-gutter').forEach(el => el.remove());
+                              onSelectionCreate(newSelection, clone.innerHTML);
+                              updateGutterMarkers();
+                              setInVivoSelection(null);
+                            }
+                          } catch (e) {
+                            console.error(e);
+                            onAlert("Error", "Failed to apply code. Please try selecting again.");
+                          }
+                        }}
+                        className="w-full text-left px-3 py-2 text-xs hover:bg-[var(--bg-panel)] border-b border-[var(--border)] last:border-0 flex items-center justify-between group"
+                      >
+                        <span className="font-medium truncate flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: code.color }}></span>
+                          {code.name}
+                        </span>
+                        {/* Show parent if exists for context */}
+                        {code.parentId && <span className="text-[10px] text-[var(--text-muted)]">{codes.find(p => p.id === code.parentId)?.name}</span>}
+                      </button>
+                    ))}
+                  {visibleCodes.filter(c => c.name.toLowerCase().includes(inVivoFilter.toLowerCase())).length === 0 && (
+                    <div className="p-4 text-center text-xs text-[var(--text-muted)] italic">No matching codes found</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-3 border-t border-[var(--border)] bg-[var(--bg-panel)] flex justify-end">
+                <button
+                  onClick={() => setInVivoSelection(null)}
+                  className="px-3 py-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-main)] transition-colors"
+                >
+                  Cancel
                 </button>
               </div>
             </div>
           </>
         )
       }
+
 
       <style>{`
         .transcript-line {
@@ -1300,10 +1510,11 @@ export const Editor = memo<EditorProps>(({
         }
 
         /* Themed Zebra — use nth-of-type so paragraph-break divs are not counted */
-        .zebra-active .transcript-line:nth-of-type(odd) {
+        /* Themed Zebra — use class based selector to avoid n-th-of-type issues with interleaved divs */
+        .zebra-active .transcript-line.zebra-row-odd {
             background-color: var(--zebra-odd); 
         }
-        .zebra-active .transcript-line:nth-of-type(even) {
+        .zebra-active .transcript-line:not(.zebra-row-odd) {
             background-color: transparent;
         }
 

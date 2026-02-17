@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { HardDrive, FilePlus, Clock, FileText, X, Cloud, LogIn, LogOut, Mail, Check, XCircle, Users, Trash2, UserPlus } from 'lucide-react';
 import { Project, CloudProject, Invitation } from '../types';
+import { ConfirmationModal, ModalType } from './ConfirmationModal';
 import { useAuth } from '../contexts/AuthContext';
 import {
   getUserProjects,
@@ -35,6 +36,50 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
   const [showNewCloudDialog, setShowNewCloudDialog] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [creatingProject, setCreatingProject] = useState(false);
+
+  // Modal State
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    type?: ModalType;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    onCancel: () => void;
+    confirmLabel?: string;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => { },
+    onCancel: () => { }
+  });
+
+  const openAlert = (title: string, message: string, type: ModalType = 'alert') => {
+    setModalConfig({
+      isOpen: true,
+      title,
+      message,
+      type,
+      confirmLabel: 'OK',
+      onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+      onCancel: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+    });
+  };
+
+  const openConfirm = (title: string, message: string, onConfirm: () => void, type: ModalType = 'confirm', confirmLabel = 'Confirm') => {
+    setModalConfig({
+      isOpen: true,
+      title,
+      message,
+      type,
+      confirmLabel,
+      onConfirm: () => {
+        onConfirm();
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+      },
+      onCancel: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+    });
+  };
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -83,20 +128,20 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
       const text = await file.text();
       const data = JSON.parse(text);
       if (!data.id || !data.transcripts) {
-        alert("Invalid .qlab file format.");
+        openAlert("Invalid File", "Invalid .qlab file format.", 'alert');
         return;
       }
       addToRecents(data.name);
       onOpenProject(data);
     } catch (err) {
-      alert("Error opening file. It may be corrupted.");
+      openAlert("Error", "Error opening file. It may be corrupted.", 'alert');
     }
   };
 
   const loadAutosave = async () => {
     const saved = localStorage.getItem('autosave_project');
     if (saved) {
-      if (confirm("Found an unsaved project recovered from browser storage. Would you like to load it?")) {
+      openConfirm("Recover Project", "Found an unsaved project recovered from browser storage. Would you like to load it?", async () => {
         const p = JSON.parse(saved);
         if (p.isCloud && p.cloudProjectId && user) {
           setLoadingCloud(true);
@@ -105,7 +150,7 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
             if (cp) {
               onOpenCloudProject(cp);
             } else {
-              alert("Could not reconnect to cloud project. Opening as local copy.");
+              openAlert("Connection Failed", "Could not reconnect to cloud project. Opening as local copy.", 'alert');
               onOpenProject(p);
             }
           } catch (e) {
@@ -117,9 +162,9 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
         } else {
           onOpenProject(p);
         }
-      }
+      });
     } else {
-      alert("No recovered project found.");
+      openAlert("No Recovery Data", "No recovered project found.", 'info');
     }
   };
 
@@ -164,7 +209,7 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
       }
     } catch (err) {
       console.error(err);
-      alert("Error creating cloud project.");
+      openAlert("Creation Error", "Error creating cloud project.", 'alert');
     } finally {
       setCreatingProject(false);
     }
@@ -177,7 +222,7 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
       await loadCloudData();
     } catch (err) {
       console.error(err);
-      alert("Error accepting invitation.");
+      openAlert("Invitation Error", "Error accepting invitation.", 'alert');
     }
   };
 
@@ -191,14 +236,15 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
   };
 
   const handleDeleteCloudProject = async (projectId: string, projectName: string) => {
-    if (!confirm(`Delete "${projectName}" permanently from the cloud? This cannot be undone.`)) return;
-    try {
-      await deleteCloudProject(projectId);
-      await loadCloudData();
-    } catch (err) {
-      console.error(err);
-      alert("Error deleting project.");
-    }
+    openConfirm("Delete Project", `Delete "${projectName}" permanently from the cloud? This cannot be undone.`, async () => {
+      try {
+        await deleteCloudProject(projectId);
+        await loadCloudData();
+      } catch (err) {
+        console.error(err);
+        openAlert("Delete Error", "Error deleting project.", 'alert');
+      }
+    }, 'danger', 'Delete Project');
   };
 
   return (
@@ -365,7 +411,7 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
                     <button
                       key={idx}
                       onClick={() => {
-                        alert(`Please select '${file.name}' from your files to load it.`);
+                        openAlert("Load File", `Please select '${file.name}' from your files to load it.`);
                         fileInputRef.current?.click();
                       }}
                       className="w-full text-left group bg-white p-4 rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-blue-300 transition-all flex items-center justify-between"
@@ -531,6 +577,16 @@ export const ProjectLauncher: React.FC<Props> = ({ onOpenProject, onCreateProjec
           </div>
         </>
       )}
+
+      <ConfirmationModal
+        isOpen={modalConfig.isOpen}
+        type={modalConfig.type}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={modalConfig.onCancel}
+        confirmLabel={modalConfig.confirmLabel}
+      />
     </div>
   );
 };

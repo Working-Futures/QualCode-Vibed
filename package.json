@@ -14,7 +14,7 @@
     "electron:build": "npm run build && electron-builder"
   },
   "dependencies": {
-    "firebase": "^12.9.0",
+    "firebase": "^11.1.0",
     "lucide-react": "^0.292.0",
     "mammoth": "^1.6.0",
     "pdfjs-dist": "^3.11.174",

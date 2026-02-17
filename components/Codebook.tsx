@@ -1,8 +1,8 @@
 import React, { useState, useMemo } from 'react';
-import { Code } from '../types';
-import { Plus, Trash2, Folder, Lock, User, Sparkles, Shield, Tag, History, AlertTriangle } from 'lucide-react';
-import { getCodeHistory, logCodeHistory } from '../services/firestoreService';
-import { CodeHistoryEntry } from '../types';
+import { Code, CodeHistoryEntry, CodebookChangeProposal } from '../types';
+import { ConfirmationModal, ModalType } from './ConfirmationModal';
+import { Plus, Trash2, Folder, Lock, User, Sparkles, Shield, Tag, History, AlertTriangle, GitPullRequest, Send, Edit2, GitMerge, X, Eye } from 'lucide-react';
+import { getCodeHistory, logCodeHistory, submitProposal, sendNotification } from '../services/firestoreService';
 
 interface CodebookProps {
   codes: Code[];
@@ -13,6 +13,9 @@ interface CodebookProps {
   currentUser?: { uid: string; displayName: string | null };
   isAdmin?: boolean;
   projectId?: string;
+  onSubmitProposal?: (proposal: CodebookChangeProposal) => void;
+  hiddenCodeIds?: Set<string>;
+  onToggleVisibility?: (id: string) => void;
 }
 
 export const Codebook: React.FC<CodebookProps> = ({
@@ -23,12 +26,65 @@ export const Codebook: React.FC<CodebookProps> = ({
   onMergeCode,
   currentUser,
   isAdmin = false,
-  projectId
+  projectId,
+  onSubmitProposal,
+  hiddenCodeIds,
+  onToggleVisibility
 }) => {
   const [selectedCodeId, setSelectedCodeId] = useState<string | null>(null);
-  const [filterType, setFilterType] = useState<'master' | 'personal' | 'suggested'>('master');
+  const [filterType, setFilterType] = useState<'master' | 'personal' | 'suggested'>('personal');
   const [mergeTargetId, setMergeTargetId] = useState<string>('');
   const [showMergeUI, setShowMergeUI] = useState(false);
+  const [showProposalForm, setShowProposalForm] = useState(false);
+  const [proposalReason, setProposalReason] = useState('');
+  const [proposalAction, setProposalAction] = useState<'edit' | 'delete' | 'merge' | 'add'>('edit');
+  const [proposalMergeTarget, setProposalMergeTarget] = useState('');
+  const [proposalSubmitting, setProposalSubmitting] = useState(false);
+
+  // Modal State
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    type: ModalType;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+    onCancel: () => void;
+    confirmLabel?: string;
+  }>({
+    isOpen: false,
+    type: 'confirm',
+    title: '',
+    message: '',
+    onConfirm: () => { },
+    onCancel: () => { }
+  });
+
+  const openAlert = (title: string, message: string, type: ModalType = 'alert') => {
+    setModalConfig({
+      isOpen: true,
+      type,
+      title,
+      message,
+      onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+      onCancel: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+      confirmLabel: 'OK'
+    });
+  };
+
+  const openConfirm = (title: string, message: string, onConfirm: () => void, type: ModalType = 'confirm', confirmLabel = 'Confirm') => {
+    setModalConfig({
+      isOpen: true,
+      type,
+      title,
+      message,
+      onConfirm: () => {
+        onConfirm();
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+      },
+      onCancel: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+      confirmLabel
+    });
+  };
 
   const activeCode = codes.find(c => c.id === selectedCodeId);
 
@@ -84,17 +140,103 @@ export const Codebook: React.FC<CodebookProps> = ({
 
   const fetchHistory = async () => {
     if (!activeCode) return;
-    if (!projectId) { alert("History is only available in cloud projects."); return; }
+    if (!projectId) { openAlert("History Unavailable", "History is only available in cloud projects.", 'info'); return; }
 
     try {
       const entries = await getCodeHistory(projectId, activeCode.id);
       setHistoryEntries(entries);
       setShowHistory(true);
-    } catch (e) { console.error(e); alert("Failed to fetch history."); }
+    } catch (e) {
+      console.error(e);
+      openAlert("Error", "Failed to fetch history.", 'danger');
+    }
   };
+
+  const handleSubmitProposal = async () => {
+    if (!activeCode || !projectId || !currentUser) return;
+    if (!proposalReason.trim()) { openAlert('Missing Information', 'Please provide a reason for your proposal.', 'alert'); return; }
+    setProposalSubmitting(true);
+    try {
+      const proposal: CodebookChangeProposal = {
+        id: crypto.randomUUID(),
+        projectId,
+        proposerId: currentUser.uid,
+        proposerName: currentUser.displayName || 'Anonymous',
+        action: proposalAction,
+        timestamp: Date.now(),
+        status: 'pending',
+        reason: proposalReason,
+      };
+
+      if (proposalAction === 'edit') {
+        proposal.targetCodeId = activeCode.id;
+        proposal.targetCodeName = activeCode.name;
+        proposal.previousData = { name: activeCode.name, color: activeCode.color, description: activeCode.description };
+        proposal.proposedData = { name: activeCode.name, color: activeCode.color, description: activeCode.description };
+      } else if (proposalAction === 'add') {
+        // Proposing a suggested code to be added to master
+        proposal.newCode = { ...activeCode, type: 'master' };
+      } else if (proposalAction === 'delete') {
+        proposal.deleteCodeId = activeCode.id;
+        proposal.deleteCodeName = activeCode.name;
+      } else if (proposalAction === 'merge') {
+        const target = codes.find(c => c.id === proposalMergeTarget);
+        if (!target) { openAlert('Selection Required', 'Select a code to merge into.', 'alert'); setProposalSubmitting(false); return; }
+        proposal.mergeSourceId = activeCode.id;
+        proposal.mergeSourceName = activeCode.name;
+        proposal.mergeTargetId = target.id;
+        proposal.mergeTargetName = target.name;
+      }
+
+      await submitProposal(projectId, proposal);
+
+      // Notify (if not already handled by submitProposal... submitProposal writes to Firestore but notification is separate)
+      await sendNotification(projectId, {
+        id: crypto.randomUUID(),
+        projectId,
+        type: 'proposal_submitted',
+        title: 'New Codebook Proposal',
+        message: `${currentUser.displayName || 'A team member'} submitted a ${proposalAction} proposal for "${activeCode.name}". Reason: ${proposalReason}`,
+        timestamp: Date.now(),
+        fromUserId: currentUser.uid,
+        fromUserName: currentUser.displayName || 'Anonymous',
+        targetUserIds: [], // All admins will see
+        readBy: [currentUser.uid],
+        relatedEntityId: activeCode.id
+      });
+
+      onSubmitProposal?.(proposal);
+      setShowProposalForm(false);
+      setProposalReason('');
+      onSubmitProposal?.(proposal);
+      setShowProposalForm(false);
+      setProposalReason('');
+      openAlert('Success', 'Proposal submitted! An admin will review it.', 'info');
+    } catch (e) {
+      console.error('Failed to submit proposal:', e);
+      openAlert('Error', 'Failed to submit proposal.', 'danger');
+    }
+    setProposalSubmitting(false);
+  };
+
+  const handleSuggestNewCode = async () => {
+    setFilterType('suggested');
+    onCreateCode('suggested');
+  };
+
+
 
   return (
     <div className="flex h-full bg-[var(--bg-panel)] relative">
+      <ConfirmationModal
+        isOpen={modalConfig.isOpen}
+        type={modalConfig.type}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={modalConfig.onCancel}
+        confirmLabel={modalConfig.confirmLabel}
+      />
       {/* History Modal Overlay */}
       {showHistory && (
         <div className="absolute inset-0 z-50 bg-black/50 flex items-center justify-center p-8 backdrop-blur-sm" onClick={() => setShowHistory(false)}>
@@ -157,10 +299,29 @@ export const Codebook: React.FC<CodebookProps> = ({
                   <Shield size={16} />
                 </button>
               )}
+              {!isAdmin && projectId && (
+                <button
+                  onClick={handleSuggestNewCode}
+                  className="flex items-center gap-1 bg-purple-100 hover:bg-purple-200 text-purple-800 px-2 py-1.5 rounded shadow-sm transition-colors text-xs font-bold"
+                  title="Suggest New Master Code"
+                >
+                  <Plus size={14} /> Suggest
+                </button>
+              )}
               <button
-                onClick={() => onCreateCode(isAdmin ? 'master' : 'personal')}
+                onClick={() => {
+                  if (filterType === 'personal') {
+                    onCreateCode('personal');
+                  } else if (filterType === 'suggested') {
+                    onCreateCode('suggested');
+                  } else {
+                    // Master tab
+                    if (isAdmin) onCreateCode('master');
+                    else onCreateCode('suggested');
+                  }
+                }}
                 className="bg-[var(--accent)] hover:brightness-110 text-[var(--accent-text)] p-2 rounded shadow-sm transition-colors"
-                title="Create Code"
+                title={filterType === 'personal' ? 'New Personal Code' : filterType === 'suggested' ? 'New Suggestion' : isAdmin ? 'New Master Code' : 'New Suggested Code'}
               >
                 <Plus size={16} />
               </button>
@@ -169,7 +330,7 @@ export const Codebook: React.FC<CodebookProps> = ({
 
           {/* Filter Tabs */}
           <div className="flex bg-[var(--bg-panel)] border border-[var(--border)] rounded-lg p-1">
-            {['master', 'personal', 'suggested'].map(t => (
+            {['personal', 'master', 'suggested'].map(t => (
               <button
                 key={t}
                 onClick={() => setFilterType(t as any)}
@@ -204,6 +365,24 @@ export const Codebook: React.FC<CodebookProps> = ({
                     </span>
                   )}
                 </div>
+                {onToggleVisibility && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onToggleVisibility(code.id); }}
+                    className={`p-1.5 rounded-full hover:bg-[var(--bg-panel)] mr-2 ${hiddenCodeIds?.has(code.id) ? 'text-[var(--text-muted)] opacity-50' : 'text-[var(--text-muted)] hover:text-[var(--text-main)]'}`}
+                    title={hiddenCodeIds?.has(code.id) ? "Show highlights" : "Hide highlights"}
+                  >
+                    {hiddenCodeIds?.has(code.id) ? (
+                      <div className="relative">
+                        <Eye size={14} />
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <div className="w-full h-px bg-red-500 transform rotate-45"></div>
+                        </div>
+                      </div>
+                    ) : (
+                      <Eye size={14} />
+                    )}
+                  </button>
+                )}
                 {/* Quick Type Badge */}
                 {code.type === 'master' && <span className="text-[10px] bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded font-bold">M</span>}
                 {code.type === 'suggested' && <span className="text-[10px] bg-purple-100 text-purple-800 px-1.5 py-0.5 rounded font-bold">?</span>}
@@ -219,21 +398,28 @@ export const Codebook: React.FC<CodebookProps> = ({
           <div className="space-y-6 max-w-3xl mx-auto bg-[var(--bg-paper)] p-8 rounded-xl shadow-sm border border-[var(--border)] relative">
 
             {/* Type Indicator & History Button */}
-            <div className="absolute top-0 right-0 flex">
+            <div className="absolute top-4 right-4 flex gap-2 items-center">
               <button
-                onClick={() => alert("History feature requires Project ID context which is currently missing in this component. Pass projectId prop to enable.")}
-                className="px-3 py-1.5 bg-[var(--bg-main)] border-b border-l border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text-main)] text-xs font-bold flex items-center gap-1.5 rounded-bl-xl transition-colors"
-                title="View History (Coming Soon)"
+                onClick={fetchHistory}
+                className="px-3 py-1.5 bg-[var(--bg-main)] border border-[var(--border)] rounded text-[var(--text-muted)] hover:text-[var(--text-main)] text-xs font-bold flex items-center gap-1.5 transition-colors"
+                title="View History"
               >
                 <History size={12} /> History
               </button>
-              <div className={`px-3 py-1.5 text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 ${activeCode.type === 'master' ? 'bg-amber-100 text-amber-800' :
+              <div className={`px-3 py-1.5 rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 ${activeCode.type === 'master' ? 'bg-amber-100 text-amber-800' :
                 activeCode.type === 'suggested' ? 'bg-purple-100 text-purple-800' :
                   'bg-slate-100 text-slate-600'
                 }`}>
                 {getIcon(activeCode.type)}
                 {getTypeLabel(activeCode.type)}
               </div>
+              <button
+                onClick={() => setSelectedCodeId(null)}
+                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors ml-2"
+                title="Close"
+              >
+                <X size={20} />
+              </button>
             </div>
 
             {/* Header */}
@@ -278,10 +464,14 @@ export const Codebook: React.FC<CodebookProps> = ({
                         {onMergeCode && (
                           <button
                             onClick={() => {
-                              if (confirm(`Merge this code into Master Code "${collision.name}"?`)) {
-                                onMergeCode(activeCode.id, collision.id);
-                                setSelectedCodeId(collision.id);
-                              }
+                              openConfirm(
+                                'Merge Code',
+                                `Merge this code into Master Code "${collision.name}"?`,
+                                () => {
+                                  onMergeCode(activeCode.id, collision.id);
+                                  setSelectedCodeId(collision.id);
+                                }
+                              );
                             }}
                             className="underline font-bold hover:text-amber-900 ml-1"
                           >
@@ -296,6 +486,73 @@ export const Codebook: React.FC<CodebookProps> = ({
               </div>
             </div>
 
+            {/* Reason for Suggestion (Only for Suggested Codes) */}
+            {activeCode.type === 'suggested' && (
+              <div className="bg-purple-50 p-4 rounded-lg border border-purple-200 space-y-2">
+                <label className="block text-xs font-bold uppercase tracking-wider text-purple-800">
+                  Reason for Suggestion
+                </label>
+                <textarea
+                  className="w-full p-2 border border-purple-200 rounded text-sm bg-white text-[var(--text-main)] focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 transition-all disabled:opacity-50"
+                  rows={2}
+                  value={activeCode.reason || ''}
+                  onChange={(e) => canEdit(activeCode) && onUpdateCode(activeCode.id, { reason: e.target.value })}
+                  disabled={!canEdit(activeCode)}
+                  placeholder="Why should this code be added to the master codebook?"
+                />
+
+                {/* Submit Suggestion Button - Only for non-admins creating suggestions */}
+                {!isAdmin && projectId && (
+                  <button
+                    onClick={async () => {
+                      if (!activeCode.reason?.trim()) { openAlert('Missing Information', 'Please provide a reason for your suggestion.', 'alert'); return; }
+
+                      openConfirm(
+                        'Submit Suggestion',
+                        'Submit this code for admin approval?',
+                        async () => {
+                          const proposal: CodebookChangeProposal = {
+                            id: crypto.randomUUID(),
+                            projectId,
+                            proposerId: currentUser?.uid || '',
+                            proposerName: currentUser?.displayName || 'Anonymous',
+                            action: 'add',
+                            timestamp: Date.now(),
+                            status: 'pending',
+                            reason: activeCode.reason || '',
+                            newCode: activeCode
+                          };
+
+                          try {
+                            await submitProposal(projectId, proposal);
+                            await sendNotification(projectId, {
+                              id: crypto.randomUUID(),
+                              projectId,
+                              type: 'proposal_submitted',
+                              title: 'New Code Suggestion',
+                              message: `${currentUser?.displayName || 'A team member'} suggested new code "${activeCode.name}".`,
+                              timestamp: Date.now(),
+                              fromUserId: currentUser?.uid || '',
+                              fromUserName: currentUser?.displayName || 'Anonymous',
+                              targetUserIds: [], // All admins
+                              readBy: [currentUser?.uid || '']
+                            });
+                            openAlert('Success', 'Suggestion submitted for review!', 'info');
+                          } catch (e) {
+                            console.error(e);
+                            openAlert('Error', 'Failed to submit suggestion.', 'danger');
+                          }
+                        }
+                      );
+                    }}
+                    className="w-full bg-purple-600 text-white py-2 rounded text-sm font-bold hover:bg-purple-700 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Send size={14} /> Submit Suggestion
+                  </button>
+                )}
+              </div>
+            )}
+
             {/* Admin Actions */}
             {isAdmin && activeCode.type === 'suggested' && (
               <div className="bg-purple-50 p-4 rounded-lg border border-purple-200 space-y-3">
@@ -309,7 +566,7 @@ export const Codebook: React.FC<CodebookProps> = ({
                       onClick={() => {
                         const collision = codes.find(c => c.type === 'master' && c.name.toLowerCase() === activeCode.name.toLowerCase());
                         if (collision) {
-                          alert(`Cannot promote: Master Code "${collision.name}" already exists. Please merge or rename.`);
+                          openAlert('Promotion Failed', `Cannot promote: Master Code "${collision.name}" already exists. Please merge or rename.`, 'danger');
                           return;
                         }
                         onUpdateCode(activeCode.id, { type: 'master' });
@@ -346,11 +603,17 @@ export const Codebook: React.FC<CodebookProps> = ({
                       <button
                         disabled={!mergeTargetId}
                         onClick={() => {
-                          if (confirm(`Merge '${activeCode.name}' into selected code? This will reassign all usage and delete '${activeCode.name}'.`)) {
-                            onMergeCode(activeCode.id, mergeTargetId);
-                            setSelectedCodeId(null);
-                            setShowMergeUI(false);
-                          }
+                          openConfirm(
+                            'Merge Code',
+                            `Merge '${activeCode.name}' into selected code? This will reassign all usage and delete '${activeCode.name}'.`,
+                            () => {
+                              onMergeCode(activeCode.id, mergeTargetId);
+                              setSelectedCodeId(null);
+                              setShowMergeUI(false);
+                            },
+                            'danger',
+                            'Merge & Delete'
+                          );
                         }}
                         className="bg-purple-600 text-white px-3 py-1 rounded text-xs font-bold disabled:opacity-50"
                       >
@@ -447,14 +710,99 @@ export const Codebook: React.FC<CodebookProps> = ({
               </p>
             </div>
 
+            {/* Non-Admin Proposal UI for Master Codes */}
+            {!isAdmin && activeCode.type === 'master' && projectId && (
+              <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="font-bold text-indigo-800 text-sm flex items-center gap-1.5">
+                      <GitPullRequest size={14} /> Suggest a Change
+                    </h4>
+                    <p className="text-xs text-indigo-600">Master codes require admin approval to modify.</p>
+                  </div>
+                  <button
+                    onClick={() => setShowProposalForm(!showProposalForm)}
+                    className="text-xs bg-indigo-600 text-white px-3 py-1.5 rounded font-bold hover:bg-indigo-700 transition-colors flex items-center gap-1"
+                  >
+                    <Send size={12} /> {showProposalForm ? 'Cancel' : 'Create Proposal'}
+                  </button>
+                </div>
+
+                {showProposalForm && (
+                  <div className="bg-white p-4 rounded-lg border border-indigo-200 space-y-3 animate-in slide-in-from-top-1">
+                    <div>
+                      <label className="text-xs font-bold text-indigo-800 block mb-1">Type of Change</label>
+                      <div className="flex gap-2">
+                        {(['edit', 'delete', 'merge'] as const).map(action => (
+                          <button
+                            key={action}
+                            onClick={() => setProposalAction(action)}
+                            className={`flex-1 text-xs py-1.5 rounded font-bold transition-colors flex items-center justify-center gap-1 ${proposalAction === action
+                              ? 'bg-indigo-600 text-white'
+                              : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'
+                              }`}
+                          >
+                            {action === 'edit' && <><Edit2 size={10} /> Edit</>}
+                            {action === 'delete' && <><Trash2 size={10} /> Remove</>}
+                            {action === 'merge' && <><GitMerge size={10} /> Merge</>}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {proposalAction === 'merge' && (
+                      <div>
+                        <label className="text-xs font-bold text-indigo-800 block mb-1">Merge into...</label>
+                        <select
+                          className="w-full text-sm border border-indigo-200 rounded p-2"
+                          value={proposalMergeTarget}
+                          onChange={e => setProposalMergeTarget(e.target.value)}
+                        >
+                          <option value="">-- Select Code --</option>
+                          {codes.filter(c => c.type === 'master' && c.id !== activeCode.id).map(c => (
+                            <option key={c.id} value={c.id}>{c.name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="text-xs font-bold text-indigo-800 block mb-1">Reason for Change</label>
+                      <textarea
+                        className="w-full text-sm border border-indigo-200 rounded p-2 focus:ring-indigo-500 focus:border-indigo-500"
+                        rows={3}
+                        placeholder="Explain why this change should be made..."
+                        value={proposalReason}
+                        onChange={e => setProposalReason(e.target.value)}
+                      />
+                    </div>
+
+                    <button
+                      onClick={handleSubmitProposal}
+                      disabled={proposalSubmitting || !proposalReason.trim()}
+                      className="w-full bg-indigo-600 text-white py-2 rounded-lg text-sm font-bold hover:bg-indigo-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
+                    >
+                      <Send size={14} /> {proposalSubmitting ? 'Submitting...' : 'Submit Proposal'}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="pt-6 border-t border-[var(--border)] flex justify-end">
               {canEdit(activeCode) && (
                 <button
                   onClick={() => {
-                    if (confirm('Are you sure you want to delete this code? All coding will be lost.')) {
-                      onDeleteCode(activeCode.id);
-                      setSelectedCodeId(null);
-                    }
+                    openConfirm(
+                      'Delete Code',
+                      'Are you sure you want to delete this code? All coding will be lost.',
+                      () => {
+                        onDeleteCode(activeCode.id);
+                        setSelectedCodeId(null);
+                      },
+                      'danger',
+                      'Delete'
+                    );
                   }}
                   className="flex items-center gap-2 text-red-600 hover:text-red-700 hover:bg-red-50 px-4 py-2 rounded transition-colors text-sm font-medium"
                 >
@@ -475,6 +823,11 @@ export const Codebook: React.FC<CodebookProps> = ({
                 <button onClick={() => onCreateCode('personal')} className="text-sm bg-[var(--accent)] text-white px-3 py-1.5 rounded hover:opacity-90">
                   + New Personal Code
                 </button>
+                {projectId && (
+                  <button onClick={handleSuggestNewCode} className="text-sm bg-purple-600 text-white px-3 py-1.5 rounded hover:bg-purple-700">
+                    + New Suggested Master Code
+                  </button>
+                )}
                 {isAdmin && (
                   <button onClick={() => onCreateCode('master')} className="text-sm bg-amber-600 text-white px-3 py-1.5 rounded hover:opacity-90">
                     + New Master Code

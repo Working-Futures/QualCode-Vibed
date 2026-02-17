@@ -11,6 +11,7 @@ export interface Code {
   type?: 'master' | 'personal' | 'suggested';
   createdBy?: string;
   suggestedBy?: string; // ID of user who suggested it
+  reason?: string; // Reason for suggestion (if type is suggested)
 }
 
 export interface Selection {
@@ -94,6 +95,7 @@ export interface UserProjectData {
   selections: Selection[];
   transcriptMemos: Record<string, string>;
   personalMemo: string;
+  personalCodes?: Code[];
 }
 
 export interface CollaboratorData {
@@ -125,8 +127,11 @@ export interface StickyNote {
   color: string;
   x: number; // Percentage (0-100) or pixels
   y: number; // Percentage (0-100) or pixels
+  width?: number; // Pixels
+  height?: number; // Pixels
   timestamp: number;
   shared?: boolean; // If true, visible to all team members; default is private
+  codebookType?: 'master' | 'personal'; // Which codebook view this note belongs to
 }
 
 export interface ChatMessage {
@@ -143,7 +148,9 @@ export interface ChatMessage {
     content: string;
   };
   editedAt?: number;
+  editHistory?: { content: string; timestamp: number }[];
   mentions?: string[]; // Array of mentioned user display names
+  deletedFor?: string[]; // Array of user IDs who have deleted this message (local delete)
 }
 
 export interface DirectMessage {
@@ -156,8 +163,16 @@ export interface DirectMessage {
   content: string;
   timestamp: number;
   readBy: string[];
+  replyTo?: {
+    id: string;
+    senderName: string;
+    content: string;
+  };
+  editedAt?: number;
+  editHistory?: { content: string; timestamp: number }[];
   /** Conversation key: sorted pair of user IDs joined by '_' */
   conversationKey: string;
+  deletedFor?: string[]; // Array of user IDs
 }
 
 export interface UserProfile {
@@ -176,10 +191,16 @@ export interface TranscriptChangeRequest {
   transcriptName: string;
   userId: string;
   userName: string;
-  content: string;
-  originalContent: string;
+  changeType: 'edit' | 'delete' | 'rename'; // Added type
+  content?: string; // Content is optional now (not needed for delete)
+  newName?: string; // For rename
+  originalContent?: string; // Original content before edit
   timestamp: number;
   status: 'pending' | 'accepted' | 'rejected';
+  rejectionReason?: string;
+  reviewedBy?: string;
+  reviewedByName?: string;
+  reviewedAt?: number;
 }
 
 export interface CodeHistoryEntry {
@@ -193,4 +214,104 @@ export interface CodeHistoryEntry {
   userName: string;
   timestamp: number;
   description?: string; // e.g. "Changed color from Red to Blue"
+}
+
+// ─── Version Control: Codebook Change Proposals ───
+
+export type ProposalAction = 'add' | 'edit' | 'delete' | 'merge' | 'split';
+
+export interface CodebookChangeProposal {
+  id: string;
+  projectId: string;
+  proposerId: string;
+  proposerName: string;
+  action: ProposalAction;
+  timestamp: number;
+  status: 'pending' | 'accepted' | 'rejected';
+  reason: string; // Why this change is proposed
+  rejectionReason?: string; // Feedback from admin on rejection
+  reviewedBy?: string;
+  reviewedByName?: string;
+  reviewedAt?: number;
+  // For 'add': the new code to be added
+  newCode?: Partial<Code>;
+  // For 'edit': which code and what changes
+  targetCodeId?: string;
+  targetCodeName?: string;
+  previousData?: Partial<Code>;
+  proposedData?: Partial<Code>;
+  // For 'delete': which code to delete
+  deleteCodeId?: string;
+  deleteCodeName?: string;
+  // For 'merge': source => target
+  mergeSourceId?: string;
+  mergeSourceName?: string;
+  mergeTargetId?: string;
+  mergeTargetName?: string;
+  // For 'split': source code => two new codes
+  splitSourceId?: string;
+  splitSourceName?: string;
+  splitNewCodes?: Partial<Code>[];
+}
+
+// ─── Version Control: Notifications ───
+
+export type NotificationType =
+  | 'document_change'       // A document was changed globally
+  | 'codebook_change'       // A master codebook code was changed/added/removed
+  | 'proposal_submitted'    // Someone submitted a proposal
+  | 'proposal_accepted'     // Your proposal was accepted
+  | 'proposal_rejected'     // Your proposal was rejected
+  | 'change_request_submitted' // Non-admin submitted a document change
+  | 'change_request_accepted'  // Admin accepted your change request
+  | 'change_request_rejected'; // Admin rejected your change request
+
+export interface AppNotification {
+  id: string;
+  projectId: string;
+  type: NotificationType;
+  title: string;
+  message: string;
+  timestamp: number;
+  // Who triggered the notification
+  fromUserId: string;
+  fromUserName: string;
+  // Who should see it (empty = everyone)
+  targetUserIds: string[];
+  // Link to related entity
+  relatedEntityId?: string;
+  relatedEntityType?: 'proposal' | 'changeRequest' | 'code' | 'transcript';
+  // Status tracking
+  readBy: string[];
+  // User response (for accept/reject notifications sent to everyone)
+  responses?: Record<string, 'accepted' | 'rejected'>;
+  rejectionReason?: string;
+}
+
+// ─── Version Control: Document Snapshots ───
+
+export interface DocumentSnapshot {
+  id: string;
+  projectId: string;
+  transcriptId: string;
+  transcriptName: string;
+  content: string;
+  savedBy: string;
+  savedByName: string;
+  timestamp: number;
+  description?: string; // e.g. "Before major edit by Admin"
+  version: number;
+}
+
+// ─── Version Control: Activity Log ───
+
+export interface VersionControlEvent {
+  id: string;
+  projectId: string;
+  eventType: 'document_edit' | 'code_create' | 'code_edit' | 'code_delete' | 'code_merge' | 'code_split' | 'proposal' | 'change_request' | 'member_promoted' | 'codebook_import';
+  userId: string;
+  userName: string;
+  timestamp: number;
+  description: string;
+  metadata?: Record<string, any>;
 }

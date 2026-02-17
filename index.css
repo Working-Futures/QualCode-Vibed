@@ -1,0 +1,110 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background-color: #f8fafc;
+}
+
+/* Transcript styling */
+.transcript-line {
+  position: relative;
+  padding-left: 160px;
+  /* Space for gutter */
+  min-height: 1.5rem;
+  line-height: 1.6;
+}
+
+.line-codes-gutter {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 150px;
+  height: 100%;
+  pointer-events: none;
+  display: flex;
+  flex-direction: row;
+  /* Or column? Usually side-by-side or stacked? */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: flex-start;
+  padding-right: 8px;
+  box-sizing: border-box;
+  /* Prevent selection of gutter items when selecting text */
+  user-select: none;
+}
+
+.line-annotation-gutter {
+  position: absolute;
+  right: -200px;
+  /* Or appropriate spacing */
+  top: 0;
+  width: 180px;
+  height: 100%;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  padding-left: 8px;
+}
+
+.gutter-marker {
+  pointer-events: auto;
+  font-size: 0.75rem;
+  font-weight: 500;
+  margin-bottom: 2px;
+  margin-left: 4px;
+  white-space: nowrap;
+  opacity: 0.85;
+}
+
+.gutter-marker .bracket {
+  font-weight: bold;
+  opacity: 0.5;
+}
+
+.annotation-bubble {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-left-width: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+  margin-bottom: 4px;
+  pointer-events: auto;
+}
+
+
+/* Robust Zebra Striping Fallback */
+.zebra-active .transcript-line.zebra-row-odd {
+  background-color: var(--zebra-odd, rgba(0, 0, 0, 0.02));
+}
+
+/* Hidden highlights: transparent background but keep text visible */
+.hidden-highlight {
+  background-color: transparent !important;
+  text-decoration-color: transparent !important;
+  /* Also hide underline? User said "view", usually means underline too */
+}

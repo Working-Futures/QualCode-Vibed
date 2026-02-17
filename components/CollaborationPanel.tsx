@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Users, Eye, UserPlus, X, Trash2, RefreshCw, Mail, ChevronDown, ChevronRight, Reply, Edit2, AtSign, MessageCircle, ArrowLeft, Send, FileText } from 'lucide-react';
 import { CloudProject, CollaboratorData, Code, Transcript, Selection, ChatMessage, DirectMessage } from '../types';
+import { ConfirmationModal, ModalType } from './ConfirmationModal';
 import {
     getAllCollaboratorData,
     createInvitation,
     removeProjectMember,
+    updateDirectMessage,
+    deleteDirectMessage,
     updateChatMessage,
     sendDirectMessage,
     subscribeToDirectMessages,
@@ -12,7 +15,9 @@ import {
     getConversationKey,
     updateProjectMemberRole,
     subscribeToChangeRequests,
-    handleRequestAction
+    handleRequestAction,
+    deleteChatMessage,
+    clearChatHistory
 } from '../services/firestoreService';
 import { TranscriptChangeRequest } from '../types';
 
@@ -23,7 +28,7 @@ interface Props {
     transcripts: Transcript[];
     onClose: () => void;
     chatMessages?: ChatMessage[];
-    onSendMessage?: (content: string, replyTo?: ChatMessage['replyTo'], mentions?: string[]) => void;
+    onSendMessage?: (content: string, replyTo?: ChatMessage['replyTo'], mentions?: string[]) => Promise<void>;
     onViewCollaborator: (userId: string, userName: string) => void;
     /** All DMs involving the current user (for unread badge) */
     allDirectMessages?: DirectMessage[];
@@ -51,20 +56,82 @@ export const CollaborationPanel: React.FC<Props> = ({
     const [newItem, setNewItem] = useState(''); // Chat input
 
     // Chat enhancements
-    const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
-    const [editingMessage, setEditingMessage] = useState<ChatMessage | null>(null);
+    const [replyingTo, setReplyingTo] = useState<ChatMessage | DirectMessage | null>(null);
+    const [editingMessage, setEditingMessage] = useState<ChatMessage | DirectMessage | null>(null);
     const [editContent, setEditContent] = useState('');
+    const [viewingHistory, setViewingHistory] = useState<ChatMessage | DirectMessage | null>(null);
     const [showMentionDropdown, setShowMentionDropdown] = useState(false);
     const [mentionFilter, setMentionFilter] = useState('');
+    const [contextMenu, setContextMenu] = useState<{ x: number; y: number; message: ChatMessage | DirectMessage; type: 'chat' | 'dm' } | null>(null);
     const chatInputRef = React.useRef<HTMLInputElement>(null);
+    const dmInputRef = React.useRef<HTMLInputElement>(null);
+
+    // Modal State
+    const [modalConfig, setModalConfig] = useState<{
+        isOpen: boolean;
+        type: ModalType;
+        title: string;
+        message: string;
+        onConfirm: (value?: string) => void;
+        onCancel: () => void;
+        confirmLabel?: string;
+    }>({
+        isOpen: false,
+        type: 'confirm',
+        title: '',
+        message: '',
+        onConfirm: () => { },
+        onCancel: () => { }
+    });
+
+    const openAlert = (title: string, message: string, type: ModalType = 'alert') => {
+        setModalConfig({
+            isOpen: true,
+            type,
+            title,
+            message,
+            onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+            onCancel: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+            confirmLabel: 'OK'
+        });
+    };
+
+    const openConfirm = (title: string, message: string, onConfirm: () => void, type: ModalType = 'confirm', confirmLabel = 'Confirm') => {
+        setModalConfig({
+            isOpen: true,
+            type,
+            title,
+            message,
+            onConfirm: () => {
+                onConfirm();
+                setModalConfig(prev => ({ ...prev, isOpen: false }));
+            },
+            onCancel: () => setModalConfig(prev => ({ ...prev, isOpen: false })),
+            confirmLabel
+        });
+    };
+
+    // Close context menu on click outside
+    useEffect(() => {
+        const handleClick = () => setContextMenu(null);
+        window.addEventListener('click', handleClick);
+        return () => window.removeEventListener('click', handleClick);
+    }, []);
 
     // DM State
     const [dmTarget, setDmTarget] = useState<{ userId: string; name: string } | null>(null);
     const [dmMessages, setDmMessages] = useState<DirectMessage[]>([]);
     const [dmInput, setDmInput] = useState('');
     const dmEndRef = React.useRef<HTMLDivElement>(null);
+    const [optimisticRoles, setOptimisticRoles] = useState<Record<string, 'admin' | 'collaborator' | 'viewer'>>({});
 
-    const isAdmin = cloudProject.ownerId === currentUserId || cloudProject.members[currentUserId]?.role === 'admin';
+    // Reset optimistic roles when cloud project updates
+    useEffect(() => {
+        setOptimisticRoles({});
+    }, [cloudProject.members]);
+
+    const isOwner = cloudProject.ownerId === currentUserId;
+    const isAdmin = isOwner || cloudProject.members[currentUserId]?.role === 'admin';
 
     // Subscribe to Change Requests for Admins
     useEffect(() => {
@@ -140,19 +207,33 @@ export const CollaborationPanel: React.FC<Props> = ({
         return () => unsub();
     }, [dmTarget, cloudProject.id, currentUserId]);
 
+    const isMounted = React.useRef(true);
+    useEffect(() => {
+        isMounted.current = true;
+        return () => { isMounted.current = false; };
+    }, []);
+
     useEffect(() => {
         loadCollaboratorData();
     }, [cloudProject.id]);
 
     const loadCollaboratorData = async () => {
+        if (!isMounted.current) return;
+        console.log('[CollaborationPanel.loadCollaboratorData] ▶ Loading collaborator data...');
         setLoading(true);
         try {
             const data = await getAllCollaboratorData(cloudProject.id, currentUserId);
-            setCollaboratorData(data);
+            console.log(`[CollaborationPanel.loadCollaboratorData] ✓ Received ${data.length} collaborators`);
+            data.forEach(c => {
+                console.log(`[CollaborationPanel.loadCollaboratorData]   - ${c.displayName} (${c.userId}): ${c.selections.length} selections, memos: ${Object.keys(c.transcriptMemos).length}`);
+            });
+            if (isMounted.current) {
+                setCollaboratorData(data);
+            }
         } catch (err) {
-            console.error('Error loading collaborator data:', err);
+            console.error('[CollaborationPanel.loadCollaboratorData] ❌ Error loading collaborator data:', err);
         } finally {
-            setLoading(false);
+            if (isMounted.current) setLoading(false);
         }
     };
 
@@ -161,18 +242,18 @@ export const CollaborationPanel: React.FC<Props> = ({
         if (!email || !isAdmin) return;
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailRegex.test(email)) {
-            alert('Please enter a valid email address.');
+            openAlert('Invalid Email', 'Please enter a valid email address.', 'alert');
             return;
         }
         const currentMember = cloudProject.members[currentUserId];
         if (currentMember?.email?.toLowerCase() === email) {
-            alert("You can't invite yourself.");
+            openAlert('Invalid Invitation', "You can't invite yourself.", 'alert');
             return;
         }
 
         const alreadyMember = cloudProject.memberEmails.some(e => e.toLowerCase() === email);
         if (alreadyMember) {
-            alert('This person is already a member of this project.');
+            openAlert('Already Member', 'This person is already a member of this project.', 'info');
             return;
         }
 
@@ -187,24 +268,25 @@ export const CollaborationPanel: React.FC<Props> = ({
             );
             setInviteEmail('');
             setShowInvite(false);
-            alert(`Invitation sent to ${email}`);
+            openAlert('Invitation Sent', `Invitation sent to ${email}`, 'info');
         } catch (err) {
             console.error(err);
-            alert("Error sending invitation.");
+            openAlert('Error', "Error sending invitation.", 'danger');
         } finally {
             setInviting(false);
         }
     };
 
     const handleRemoveMember = async (userId: string, email: string, name: string) => {
-        if (!confirm(`Remove ${name} from this project? Their coding data will be deleted.`)) return;
-        try {
-            await removeProjectMember(cloudProject.id, userId, email);
-            setCollaboratorData(prev => prev.filter(c => c.userId !== userId));
-        } catch (err) {
-            console.error(err);
-            alert("Error removing member.");
-        }
+        openConfirm('Remove Member', `Remove ${name} from this project? Their coding data will be deleted.`, async () => {
+            try {
+                await removeProjectMember(cloudProject.id, userId, email);
+                setCollaboratorData(prev => prev.filter(c => c.userId !== userId));
+            } catch (err) {
+                console.error(err);
+                openAlert('Error', "Error removing member.", 'danger');
+            }
+        }, 'danger', 'Remove');
     };
 
     // --- Chat helpers ---
@@ -274,31 +356,107 @@ export const CollaborationPanel: React.FC<Props> = ({
         return parts;
     };
 
-    const handleSendChat = () => {
+    const handleContextMenu = (e: React.MouseEvent, msg: ChatMessage | DirectMessage, type: 'chat' | 'dm') => {
+        e.preventDefault();
+        setContextMenu({
+            x: e.clientX,
+            y: e.clientY,
+            message: msg,
+            type
+        });
+    };
+
+    const handleDeleteMessage = async (msgId: string, senderId: string) => {
+        const isMyMessage = senderId === currentUserId;
+        const confirmText = isMyMessage ? 'Unsend this message?' : 'Delete this message for yourself?';
+
+        openConfirm('Delete Message', confirmText, async () => {
+            try {
+                if (isMyMessage) {
+                    await deleteChatMessage(cloudProject.id, msgId);
+                } else {
+                    await deleteChatMessage(cloudProject.id, msgId, currentUserId);
+                }
+            } catch (err) {
+                console.error('Failed to delete message:', err);
+            }
+        }, 'danger', 'Delete');
+    };
+
+    const handleDeleteDm = async (msgId: string, senderId: string) => {
+        const isMyMessage = senderId === currentUserId;
+        const confirmText = isMyMessage ? 'Unsend this message?' : 'Delete this message for yourself?';
+
+        openConfirm('Delete Message', confirmText, async () => {
+            try {
+                if (isMyMessage) {
+                    await deleteDirectMessage(cloudProject.id, msgId);
+                } else {
+                    await deleteDirectMessage(cloudProject.id, msgId, currentUserId);
+                }
+            } catch (err) {
+                console.error('Failed to delete DM:', err);
+            }
+        }, 'danger', 'Delete');
+    };
+
+    const handleClearChat = async () => {
+        openConfirm('Clear Chat History', 'Are you sure you want to clear the ENTIRE chat history? This cannot be undone.', async () => {
+            try {
+                await clearChatHistory(cloudProject.id);
+            } catch (err) {
+                console.error('Failed to clear chat:', err);
+            }
+        }, 'danger', 'Clear All');
+    };
+
+    const handleSendChat = async () => {
         if (!newItem.trim() || !onSendMessage) return;
         const mentions = extractMentions(newItem);
-        const replyData = replyingTo ? {
+        const replyData = replyingTo && 'senderId' in replyingTo ? { // Check if ChatMessage
             id: replyingTo.id,
             senderName: replyingTo.senderName,
             content: replyingTo.content.substring(0, 100)
         } : undefined;
 
-        onSendMessage(newItem.trim(), replyData, mentions.length > 0 ? mentions : undefined);
-        setNewItem('');
-        setReplyingTo(null);
+        try {
+            await onSendMessage(newItem.trim(), replyData, mentions.length > 0 ? mentions : undefined);
+            setNewItem('');
+            setReplyingTo(null);
+        } catch (err) {
+            console.error('Failed to send message:', err);
+            openAlert('Error', 'Failed to send message. Please try again.', 'danger');
+        }
     };
 
     const handleEditSave = async () => {
         if (!editingMessage || !editContent.trim()) return;
-        try {
-            await updateChatMessage(cloudProject.id, editingMessage.id, {
-                content: editContent.trim(),
-                editedAt: Date.now()
-            });
-            setEditingMessage(null);
-            setEditContent('');
-        } catch (err) {
-            console.error('Error editing message:', err);
+
+        // Handle Chat Message Edit
+        if ('senderId' in editingMessage) {
+            try {
+                await updateChatMessage(cloudProject.id, editingMessage.id, {
+                    content: editContent.trim(),
+                    editedAt: Date.now()
+                }, editingMessage.content); // Pass previous content for history
+                setEditingMessage(null);
+                setEditContent('');
+            } catch (err) {
+                console.error('Error editing message:', err);
+            }
+        }
+        // Handle DM Edit
+        else if ('conversationKey' in editingMessage) {
+            try {
+                await updateDirectMessage(cloudProject.id, editingMessage.id, {
+                    content: editContent.trim(),
+                    editedAt: Date.now()
+                }, editingMessage.content);
+                setEditingMessage(null);
+                setEditContent('');
+            } catch (err) {
+                console.error('Error editing DM:', err);
+            }
         }
     };
 
@@ -314,6 +472,13 @@ export const CollaborationPanel: React.FC<Props> = ({
         const currentMember = cloudProject.members[currentUserId];
         const convKey = getConversationKey(currentUserId, dmTarget.userId);
 
+        // Handle reply
+        const replyData = replyingTo && 'conversationKey' in replyingTo ? {
+            id: replyingTo.id,
+            senderName: replyingTo.fromName,
+            content: replyingTo.content.substring(0, 100)
+        } : undefined;
+
         const newMsg: DirectMessage = {
             id: crypto.randomUUID(),
             projectId: cloudProject.id,
@@ -324,10 +489,12 @@ export const CollaborationPanel: React.FC<Props> = ({
             content: dmInput.trim(),
             timestamp: Date.now(),
             readBy: [currentUserId],
-            conversationKey: convKey
+            conversationKey: convKey,
+            replyTo: replyData
         };
 
         setDmInput('');
+        setReplyingTo(null);
         // Optimistic update
         setDmMessages(prev => [...prev, newMsg]);
         try {
@@ -384,6 +551,15 @@ export const CollaborationPanel: React.FC<Props> = ({
                                 >
                                     Team Chat
                                 </button>
+                                {activeTab === 'chat' && isAdmin && (
+                                    <button
+                                        onClick={handleClearChat}
+                                        className="text-xs text-red-300 hover:text-white ml-2 px-2 py-0.5 border border-red-300/30 rounded hover:bg-red-500/20 transition-colors"
+                                        title="Clear History"
+                                    >
+                                        Clear
+                                    </button>
+                                )}
                                 <button
                                     onClick={() => { setActiveTab('dm'); setDmTarget(null); }}
                                     className={`text-sm font-bold pb-1 border-b-2 transition-colors relative ${activeTab === 'dm' ? 'border-white text-white' : 'border-transparent text-slate-400 hover:text-white'}`}
@@ -464,44 +640,78 @@ export const CollaborationPanel: React.FC<Props> = ({
                                 </div>
                             )}
                             <div className="flex flex-wrap gap-2">
-                                {Object.values(cloudProject.members).map((member) => (
-                                    <div
-                                        key={member.userId}
-                                        className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${member.userId === currentUserId
-                                            ? 'bg-blue-100 border-blue-300 text-blue-700'
-                                            : 'bg-[var(--bg-panel)] border-[var(--border)] text-[var(--text-main)]'
-                                            }`}
-                                    >
+                                {Object.values(cloudProject.members).map((member) => {
+                                    const role = optimisticRoles[member.userId] || member.role;
+                                    return (
                                         <div
-                                            className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
-                                            style={{ backgroundColor: member.userId === currentUserId ? '#2563eb' : '#6366f1' }}
+                                            key={member.userId}
+                                            className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${member.userId === currentUserId
+                                                ? 'bg-blue-100 border-blue-300 text-blue-700'
+                                                : 'bg-[var(--bg-panel)] border-[var(--border)] text-[var(--text-main)]'
+                                                }`}
                                         >
-                                            {member.displayName[0]?.toUpperCase()}
-                                        </div>
-                                        <span>{member.displayName}</span>
-                                        {member.role === 'admin' && <span className="text-[10px] opacity-60">👑</span>}
-                                        {member.userId === currentUserId && <span className="text-[10px] opacity-60">(you)</span>}
-                                        {isAdmin && member.userId !== currentUserId && (
-                                            <button
-                                                onClick={() => handleRemoveMember(member.userId, member.email, member.displayName)}
-                                                className="text-slate-400 hover:text-red-500 ml-1"
-                                                title="Remove member"
+                                            <div
+                                                className="w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
+                                                style={{ backgroundColor: member.userId === currentUserId ? '#2563eb' : '#6366f1' }}
                                             >
-                                                <X size={10} />
-                                            </button>
-                                        )}
-                                        {isAdmin && member.userId !== currentUserId && member.role !== 'admin' && (
-                                            <button
-                                                onClick={() => updateProjectMemberRole(cloudProject.id, member.userId, 'admin')}
-                                                className="text-slate-400 hover:text-amber-500 ml-1 flex items-center gap-1 border border-slate-600 rounded px-1"
-                                                title="Make Admin"
-                                            >
-                                                <span className="text-[9px]">Make Admin</span>
-                                            </button>
-                                        )}
+                                                {member.displayName[0]?.toUpperCase()}
+                                            </div>
+                                            <span>{member.displayName}</span>
+                                            {role === 'admin' && <span className="text-[10px] opacity-60">👑</span>}
+                                            {member.userId === currentUserId && <span className="text-[10px] opacity-60">(you)</span>}
+                                            {/* Remove Member Logic:
+                                                - Owner can remove anyone (except self, handled by UI check)
+                                                - Admins can remove collaborators, but NOT other admins
+                                            */}
+                                            {(isOwner || (isAdmin && role !== 'admin')) && member.userId !== currentUserId && (
+                                                <button
+                                                    onClick={() => handleRemoveMember(member.userId, member.email, member.displayName)}
+                                                    className="text-slate-400 hover:text-red-500 ml-1"
+                                                    title="Remove member"
+                                                >
+                                                    <X size={10} />
+                                                </button>
+                                            )}
 
-                                    </div>
-                                ))}
+                                            {/* Promote to Admin: Admins can promote collaborators */}
+                                            {isAdmin && member.userId !== currentUserId && role !== 'admin' && (
+                                                <button
+                                                    onClick={() => {
+                                                        setOptimisticRoles(prev => ({ ...prev, [member.userId]: 'admin' }));
+                                                        updateProjectMemberRole(cloudProject.id, member.userId, 'admin');
+                                                    }}
+                                                    className="text-slate-400 hover:text-amber-500 ml-1 flex items-center gap-1 border border-slate-600 rounded px-1"
+                                                    title="Make Admin"
+                                                >
+                                                    <span className="text-[9px]">Make Admin</span>
+                                                </button>
+                                            )}
+
+                                            {/* Demote Admin: Only Owner can remove admin status */}
+                                            {isOwner && member.userId !== currentUserId && role === 'admin' && (
+                                                <button
+                                                    onClick={() => {
+                                                        openConfirm(
+                                                            'Remove Admin',
+                                                            `Remove admin privileges from ${member.displayName}?`,
+                                                            () => {
+                                                                setOptimisticRoles(prev => ({ ...prev, [member.userId]: 'collaborator' }));
+                                                                updateProjectMemberRole(cloudProject.id, member.userId, 'collaborator');
+                                                            },
+                                                            'danger',
+                                                            'Remove Admin'
+                                                        );
+                                                    }}
+                                                    className="text-slate-400 hover:text-red-400 ml-1 flex items-center gap-1 border border-slate-600 rounded px-1"
+                                                    title="Remove Admin"
+                                                >
+                                                    <span className="text-[9px]">Remove Admin</span>
+                                                </button>
+                                            )}
+
+                                        </div>
+                                    );
+                                })}
                             </div>
                         </div>
 
@@ -570,6 +780,7 @@ export const CollaborationPanel: React.FC<Props> = ({
                                                                 <button
                                                                     onClick={(e) => {
                                                                         e.stopPropagation();
+                                                                        console.log(`[CollaborationPanel] View button clicked for user="${collab.displayName}" (${collab.userId})`);
                                                                         onViewCollaborator(collab.userId, collab.displayName);
                                                                         onClose();
                                                                     }}
@@ -651,21 +862,23 @@ export const CollaborationPanel: React.FC<Props> = ({
                 {activeTab === 'chat' && (
                     <div className="flex-1 flex flex-col overflow-hidden bg-[var(--bg-main)]">
                         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                            {chatMessages.length === 0 ? (
+                            {chatMessages.filter(msg => !msg.deletedFor?.includes(currentUserId)).length === 0 ? (
                                 <div className="text-center text-[var(--text-muted)] py-10 opacity-50">
                                     <Mail size={40} className="mx-auto mb-2" />
                                     <p>No messages yet. Start the conversation!</p>
                                     <p className="text-xs mt-1">Use @name to mention teammates</p>
                                 </div>
                             ) : (
-                                chatMessages.map(msg => (
+                                chatMessages.filter(msg => !msg.deletedFor?.includes(currentUserId)).map(msg => (
                                     <div
                                         key={msg.id}
+                                        onContextMenu={(e) => handleContextMenu(e, msg, 'chat')}
                                         className={`flex flex-col ${msg.senderId === currentUserId ? 'items-end' : 'items-start'} group`}
                                     >
                                         {/* Reply Context */}
                                         {msg.replyTo && (
-                                            <div className={`max-w-[80%] mb-1 px-3 py-1.5 rounded-lg text-[10px] border-l-2 border-blue-400 ${msg.senderId === currentUserId ? 'bg-blue-500/10 text-blue-200' : 'bg-[var(--bg-panel)] text-[var(--text-muted)]'}`}>
+                                            <div className={`max-w-[80%] mb-1 px-3 py-1.5 rounded-lg text-[10px] border-l-2 ${msg.senderId === currentUserId ? 'border-blue-400' : 'border-slate-400'} bg-[var(--bg-panel)] text-[var(--text-muted)] shadow-sm ${msg.senderId === currentUserId ? 'opacity-90' : ''
+                                                }`}>
                                                 <span className="font-bold">{msg.replyTo.senderName}:</span>{' '}
                                                 <span className="italic">{msg.replyTo.content.substring(0, 80)}{msg.replyTo.content.length > 80 ? '...' : ''}</span>
                                             </div>
@@ -693,11 +906,19 @@ export const CollaborationPanel: React.FC<Props> = ({
                                         ) : (
                                             <div className={`max-w-[80%] rounded-xl p-3 text-sm relative ${msg.senderId === currentUserId
                                                 ? 'bg-blue-600 text-white rounded-br-none'
-                                                : 'bg-[var(--bg-panel)] border border-[var(--border)] text-[var(--text-main)] rounded-bl-none'
+                                                : 'bg-[var(--bg-panel)] border border-[var(--border)] text-[var(--text-main)] rounded-bl-none shadow-sm'
                                                 }`}>
                                                 <p>{renderMessageContent(msg.content)}</p>
                                                 {msg.editedAt && (
-                                                    <span className={`text-[9px] italic ${msg.senderId === currentUserId ? 'text-blue-200' : 'text-[var(--text-muted)]'}`}> (edited)</span>
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setViewingHistory(msg);
+                                                        }}
+                                                        className={`text-[9px] italic hover:underline cursor-pointer ${msg.senderId === currentUserId ? 'text-blue-200' : 'text-[var(--text-muted)]'}`}
+                                                    >
+                                                        (edited)
+                                                    </button>
                                                 )}
                                             </div>
                                         )}
@@ -710,27 +931,6 @@ export const CollaborationPanel: React.FC<Props> = ({
                                             <span className="text-[10px] text-[var(--text-muted)] opacity-60">
                                                 • {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                             </span>
-                                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 ml-2">
-                                                <button
-                                                    onClick={() => setReplyingTo(msg)}
-                                                    className="text-[10px] text-[var(--text-muted)] hover:text-blue-500 flex items-center gap-0.5 px-1 py-0.5 rounded hover:bg-[var(--bg-panel)]"
-                                                    title="Reply"
-                                                >
-                                                    <Reply size={10} /> Reply
-                                                </button>
-                                                {msg.senderId === currentUserId && (
-                                                    <button
-                                                        onClick={() => {
-                                                            setEditingMessage(msg);
-                                                            setEditContent(msg.content);
-                                                        }}
-                                                        className="text-[10px] text-[var(--text-muted)] hover:text-amber-500 flex items-center gap-0.5 px-1 py-0.5 rounded hover:bg-[var(--bg-panel)]"
-                                                        title="Edit"
-                                                    >
-                                                        <Edit2 size={10} /> Edit
-                                                    </button>
-                                                )}
-                                            </div>
                                         </div>
                                     </div>
                                 ))
@@ -741,9 +941,9 @@ export const CollaborationPanel: React.FC<Props> = ({
                         {/* Reply Preview */}
                         {replyingTo && (
                             <div className="px-4 pt-2 bg-[var(--bg-panel)] border-t border-[var(--border)]">
-                                <div className="flex items-center justify-between bg-blue-50 rounded-lg px-3 py-2 text-xs border-l-3 border-blue-500">
-                                    <div className="truncate">
-                                        <span className="font-bold text-blue-700">Replying to {replyingTo.senderName}: </span>
+                                <div className="flex items-center justify-between bg-blue-50 rounded-lg px-3 py-2 text-xs border-l-3 border-blue-500 shadow-inner">
+                                    <div className="truncate text-slate-700">
+                                        <span className="font-bold text-blue-700">Replying to {'senderName' in replyingTo ? replyingTo.senderName : replyingTo.fromName}: </span>
                                         <span className="text-blue-600 italic">{replyingTo.content.substring(0, 60)}...</span>
                                     </div>
                                     <button onClick={() => setReplyingTo(null)} className="text-blue-400 hover:text-blue-600 ml-2 flex-shrink-0">
@@ -782,7 +982,7 @@ export const CollaborationPanel: React.FC<Props> = ({
                                 <input
                                     ref={chatInputRef}
                                     type="text"
-                                    className="flex-1 bg-[var(--bg-main)] border border-[var(--border)] rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    className="flex-1 bg-[var(--bg-main)] border border-[var(--border)] rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-[var(--text-main)] placeholder-[var(--text-muted)]"
                                     placeholder="Type a message... (@ to mention)"
                                     value={newItem}
                                     onChange={(e) => handleChatInputChange(e.target.value)}
@@ -796,12 +996,14 @@ export const CollaborationPanel: React.FC<Props> = ({
                                 <button
                                     type="submit"
                                     disabled={!newItem.trim()}
-                                    className="bg-blue-600 text-white p-2 rounded-full hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                    className="p-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                 >
-                                    <Send size={18} />
+                                    <Send size={20} />
                                 </button>
                             </form>
                         </div>
+
+
                     </div>
                 )}
 
@@ -889,17 +1091,60 @@ export const CollaborationPanel: React.FC<Props> = ({
                                             <p className="text-xs mt-1">Send the first message!</p>
                                         </div>
                                     ) : (
-                                        dmMessages.map(msg => (
+                                        dmMessages.filter(msg => !msg.deletedFor?.includes(currentUserId)).map(msg => (
                                             <div
                                                 key={msg.id}
-                                                className={`flex flex-col ${msg.fromId === currentUserId ? 'items-end' : 'items-start'}`}
+                                                onContextMenu={(e) => handleContextMenu(e, msg, 'dm')}
+                                                className={`flex flex-col ${msg.fromId === currentUserId ? 'items-end' : 'items-start'} group`}
                                             >
-                                                <div className={`max-w-[80%] rounded-xl p-3 text-sm ${msg.fromId === currentUserId
-                                                    ? 'bg-emerald-600 text-white rounded-br-none'
-                                                    : 'bg-[var(--bg-panel)] border border-[var(--border)] text-[var(--text-main)] rounded-bl-none'
-                                                    }`}>
-                                                    <p>{msg.content}</p>
-                                                </div>
+                                                {/* Reply Context */}
+                                                {msg.replyTo && (
+                                                    <div className={`max-w-[80%] mb-1 px-3 py-1.5 rounded-lg text-[10px] border-l-2 ${msg.fromId === currentUserId ? 'border-emerald-400' : 'border-slate-400'} bg-[var(--bg-panel)] text-[var(--text-muted)] shadow-sm ${msg.fromId === currentUserId ? 'opacity-90' : ''
+                                                        }`}>
+                                                        <span className="font-bold">{msg.replyTo.senderName}:</span>{' '}
+                                                        <span className="italic">{msg.replyTo.content.substring(0, 80)}{msg.replyTo.content.length > 80 ? '...' : ''}</span>
+                                                    </div>
+                                                )}
+
+                                                {/* Message Bubble */}
+                                                {editingMessage?.id === msg.id ? (
+                                                    <div className="max-w-[80%] w-full">
+                                                        <input
+                                                            type="text"
+                                                            value={editContent}
+                                                            onChange={(e) => setEditContent(e.target.value)}
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === 'Enter') handleEditSave();
+                                                                if (e.key === 'Escape') { setEditingMessage(null); setEditContent(''); }
+                                                            }}
+                                                            autoFocus
+                                                            className="w-full p-2 text-sm border border-emerald-400 rounded-lg bg-[var(--bg-panel)] text-[var(--text-main)] focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                                        />
+                                                        <div className="flex gap-1 mt-1 justify-end">
+                                                            <button onClick={() => { setEditingMessage(null); setEditContent(''); }} className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-main)] px-2 py-0.5 rounded">Cancel</button>
+                                                            <button onClick={handleEditSave} className="text-[10px] bg-emerald-600 text-white px-2 py-0.5 rounded font-bold">Save</button>
+                                                        </div>
+                                                    </div>
+                                                ) : (
+                                                    <div className={`max-w-[80%] rounded-xl p-3 text-sm relative ${msg.fromId === currentUserId
+                                                        ? 'bg-emerald-600 text-white rounded-br-none'
+                                                        : 'bg-[var(--bg-panel)] border border-[var(--border)] text-[var(--text-main)] rounded-bl-none shadow-sm'
+                                                        }`}>
+                                                        <p>{msg.content}</p>
+                                                        {msg.editedAt && (
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    setViewingHistory(msg);
+                                                                }}
+                                                                className={`text-[9px] italic hover:underline cursor-pointer ${msg.fromId === currentUserId ? 'text-emerald-200' : 'text-[var(--text-muted)]'}`}
+                                                            >
+                                                                (edited)
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                )}
+
                                                 <span className="text-[10px] text-[var(--text-muted)] mt-0.5 px-1">
                                                     {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                                 </span>
@@ -909,6 +1154,21 @@ export const CollaborationPanel: React.FC<Props> = ({
                                     <div ref={dmEndRef} />
                                 </div>
 
+                                {/* Reply Preview (DM) */}
+                                {replyingTo && (
+                                    <div className="px-4 pt-2 bg-[var(--bg-panel)] border-t border-[var(--border)]">
+                                        <div className="flex items-center justify-between bg-emerald-50 rounded-lg px-3 py-2 text-xs border-l-3 border-emerald-500 shadow-inner">
+                                            <div className="truncate text-slate-700">
+                                                <span className="font-bold text-emerald-700">Replying to {'senderName' in replyingTo ? replyingTo.senderName : replyingTo.fromName}: </span>
+                                                <span className="text-emerald-600 italic">{replyingTo.content.substring(0, 60)}...</span>
+                                            </div>
+                                            <button onClick={() => setReplyingTo(null)} className="text-emerald-400 hover:text-emerald-600 ml-2 flex-shrink-0">
+                                                <X size={14} />
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* DM Input */}
                                 <div className="p-4 bg-[var(--bg-panel)] border-t border-[var(--border)]">
                                     <form
@@ -916,19 +1176,22 @@ export const CollaborationPanel: React.FC<Props> = ({
                                         onSubmit={(e) => { e.preventDefault(); handleSendDm(); }}
                                     >
                                         <input
+                                            ref={dmInputRef}
                                             type="text"
-                                            className="flex-1 bg-[var(--bg-main)] border border-[var(--border)] rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                                            className="flex-1 bg-[var(--bg-main)] border border-[var(--border)] rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 text-[var(--text-main)] placeholder-[var(--text-muted)]"
                                             placeholder={`Message ${dmTarget.name}...`}
                                             value={dmInput}
                                             onChange={(e) => setDmInput(e.target.value)}
-                                            autoFocus
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Escape') setReplyingTo(null);
+                                            }}
                                         />
                                         <button
                                             type="submit"
                                             disabled={!dmInput.trim()}
-                                            className="bg-emerald-600 text-white p-2 rounded-full hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                                            className="p-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                         >
-                                            <Send size={18} />
+                                            <Send size={20} />
                                         </button>
                                     </form>
                                 </div>
@@ -936,7 +1199,6 @@ export const CollaborationPanel: React.FC<Props> = ({
                         )}
                     </div>
                 )}
-
                 {/* ─── REQUESTS TAB ─── */}
                 {activeTab === 'requests' && isAdmin && (
                     <div className="flex-1 flex flex-col overflow-hidden bg-[var(--bg-main)]">
@@ -979,9 +1241,13 @@ export const CollaborationPanel: React.FC<Props> = ({
                                             <div className="flex gap-2 justify-end pt-2 border-t border-[var(--border)]">
                                                 <button
                                                     onClick={() => {
-                                                        if (confirm('Are you sure you want to reject this request?')) {
-                                                            handleRequestAction(cloudProject.id, req.id, 'rejected');
-                                                        }
+                                                        openConfirm(
+                                                            'Reject Request',
+                                                            'Are you sure you want to reject this request?',
+                                                            () => handleRequestAction(cloudProject.id, req.id, 'rejected'),
+                                                            'danger',
+                                                            'Reject'
+                                                        );
                                                     }}
                                                     className="px-3 py-1.5 text-xs font-bold text-red-600 hover:bg-red-50 rounded border border-red-200 transition-colors"
                                                 >
@@ -989,9 +1255,13 @@ export const CollaborationPanel: React.FC<Props> = ({
                                                 </button>
                                                 <button
                                                     onClick={() => {
-                                                        if (confirm('This will update the transcript content. Continue?')) {
-                                                            handleRequestAction(cloudProject.id, req.id, 'accepted', req.transcriptId, req.content);
-                                                        }
+                                                        openConfirm(
+                                                            'Accept Changes',
+                                                            'This will update the transcript content. Continue?',
+                                                            () => handleRequestAction(cloudProject.id, req.id, 'accepted', req.transcriptId, req.content),
+                                                            'confirm',
+                                                            'Accept'
+                                                        );
                                                     }}
                                                     className="px-3 py-1.5 text-xs font-bold bg-green-600 text-white hover:bg-green-700 rounded shadow-sm flex items-center gap-1 transition-colors"
                                                 >
@@ -1006,6 +1276,111 @@ export const CollaborationPanel: React.FC<Props> = ({
                     </div>
                 )}
             </div>
+
+            <ConfirmationModal
+                isOpen={modalConfig.isOpen}
+                type={modalConfig.type}
+                title={modalConfig.title}
+                message={modalConfig.message}
+                onConfirm={modalConfig.onConfirm}
+                onCancel={modalConfig.onCancel}
+                confirmLabel={modalConfig.confirmLabel}
+            />
+
+            {/* Context Menu */}
+            {contextMenu && (
+                <div
+                    className="fixed z-[60] bg-[var(--bg-panel)] border border-[var(--border)] shadow-xl rounded-lg py-1 min-w-[150px] animate-in fade-in zoom-in-95 duration-100"
+                    style={{ top: contextMenu.y, left: contextMenu.x }}
+                >
+                    <button
+                        onClick={() => {
+                            setReplyingTo(contextMenu.message);
+                            setContextMenu(null);
+                            if (contextMenu.type === 'chat') {
+                                chatInputRef.current?.focus();
+                            } else {
+                                dmInputRef.current?.focus();
+                            }
+                        }}
+                        className="w-full text-left px-4 py-2 text-sm hover:bg-[var(--bg-main)] text-[var(--text-main)] flex items-center gap-2"
+                    >
+                        <Reply size={14} /> Reply
+                    </button>
+
+                    {/* Edit Option: Only if it's MY message */}
+                    {((contextMenu.type === 'chat' && (contextMenu.message as ChatMessage).senderId === currentUserId) ||
+                        (contextMenu.type === 'dm' && (contextMenu.message as DirectMessage).fromId === currentUserId)) && (
+                            <button
+                                onClick={() => {
+                                    setEditingMessage(contextMenu.message);
+                                    setEditContent(contextMenu.message.content);
+                                    setContextMenu(null);
+                                }}
+                                className="w-full text-left px-4 py-2 text-sm hover:bg-[var(--bg-main)] text-[var(--text-main)] flex items-center gap-2"
+                            >
+                                <Edit2 size={14} /> Edit
+                            </button>
+                        )}
+
+                    {/* Delete Option */}
+                    <button
+                        onClick={() => {
+                            if (contextMenu.type === 'chat') {
+                                const msg = contextMenu.message as ChatMessage;
+                                handleDeleteMessage(msg.id, msg.senderId);
+                            } else {
+                                const msg = contextMenu.message as DirectMessage;
+                                handleDeleteDm(msg.id, msg.fromId);
+                            }
+                            setContextMenu(null);
+                        }}
+                        className="w-full text-left px-4 py-2 text-sm text-red-500 hover:bg-red-50 hover:text-red-700 flex items-center gap-2"
+                    >
+                        <Trash2 size={14} />
+                        {/* Show "Unsend" if it's my message, otherwise "Delete" */}
+                        {((contextMenu.type === 'chat' && (contextMenu.message as ChatMessage).senderId === currentUserId) ||
+                            (contextMenu.type === 'dm' && (contextMenu.message as DirectMessage).fromId === currentUserId))
+                            ? 'Unsend' : 'Delete'}
+                    </button>
+                </div>
+            )}
+
+            {/* History Modal */}
+            {viewingHistory && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={() => setViewingHistory(null)}>
+                    <div className="bg-[var(--bg-panel)] w-full max-w-md rounded-xl shadow-2xl border border-[var(--border)] overflow-hidden" onClick={e => e.stopPropagation()}>
+                        <div className="p-4 border-b border-[var(--border)] flex justify-between items-center bg-[var(--bg-header)] text-white">
+                            <h3 className="font-bold flex items-center gap-2">
+                                <RefreshCw size={16} /> Edit History
+                            </h3>
+                            <button onClick={() => setViewingHistory(null)} className="hover:bg-white/10 p-1 rounded">
+                                <X size={18} />
+                            </button>
+                        </div>
+                        <div className="max-h-[60vh] overflow-y-auto p-4 space-y-4 bg-[var(--bg-main)]">
+                            {viewingHistory.editHistory?.slice().reverse().map((edit, i) => (
+                                <div key={i} className="text-sm border-b border-[var(--border)] pb-3 last:border-0 last:pb-0">
+                                    <div className="text-xs text-[var(--text-muted)] mb-1">
+                                        {new Date(edit.timestamp).toLocaleString()}
+                                    </div>
+                                    <div className="bg-[var(--bg-panel)] p-2 rounded text-[var(--text-main)]">
+                                        {edit.content}
+                                    </div>
+                                </div>
+                            ))}
+                            <div className="text-sm pt-2">
+                                <div className="text-xs text-[var(--text-muted)] mb-1 font-bold">
+                                    Current Version
+                                </div>
+                                <div className="bg-blue-50/50 p-2 rounded border border-blue-100 text-[var(--text-main)]">
+                                    {viewingHistory.content}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

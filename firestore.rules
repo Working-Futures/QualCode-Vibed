@@ -14,12 +14,12 @@ service cloud.firestore {
 
       // Only members can read
       allow read: if request.auth != null &&
-        request.auth.token.email in resource.data.memberEmails;
+        request.auth.token.email.lower() in resource.data.memberEmails;
 
       // Members can update
       allow update: if request.auth != null && (
         // Case 1: Already a member
-        request.auth.token.email in resource.data.memberEmails ||
+        request.auth.token.email.lower() in resource.data.memberEmails ||
         // Case 2: Joining via Invitation
         (
           // Verify the invitation token
@@ -36,14 +36,14 @@ service cloud.firestore {
       // ─── Transcripts: Members can read/write ───
       match /transcripts/{transcriptId} {
         allow read, write: if request.auth != null &&
-          request.auth.token.email in
+          request.auth.token.email.lower() in
           get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
       }
 
       // ─── Codes: Members can read/write (shared codebook) ───
       match /codes/{codeId} {
         allow read, write: if request.auth != null &&
-          request.auth.token.email in
+          request.auth.token.email.lower() in
           get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
       }
 
@@ -51,7 +51,7 @@ service cloud.firestore {
       match /userdata/{userId} {
         // All project members can read (needed for collaboration view)
         allow read: if request.auth != null &&
-          request.auth.token.email in
+          request.auth.token.email.lower() in
           get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
 
         // Only the data owner can write their own data
@@ -61,14 +61,63 @@ service cloud.firestore {
       // ─── Sticky Notes: Members can read/write ───
       match /notes/{noteId} {
         allow read, write: if request.auth != null &&
-          request.auth.token.email in
+          request.auth.token.email.lower() in
           get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
       }
 
       // ─── Chat: Members can read/write ───
       match /chat/{messageId} {
         allow read, write: if request.auth != null &&
-          request.auth.token.email in
+          request.auth.token.email.lower() in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Direct Messages: Members can read/write ───
+      match /directMessages/{messageId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email.lower() in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Code History: Members can read/write ───
+      match /codeHistory/{entryId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email.lower() in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Change Requests: Members can read/write ───
+      match /changeRequests/{requestId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email.lower() in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Proposals: Members can read/write ───
+      match /proposals/{proposalId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email.lower() in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Notifications: Members can read/write ───
+      match /notifications/{notificationId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email.lower() in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Document Snapshots: Members can read/write ───
+      match /documentSnapshots/{snapshotId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email.lower() in
+          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+      }
+
+      // ─── Activity Log: Members can read/write ───
+      match /activityLog/{eventId} {
+        allow read, write: if request.auth != null &&
+          request.auth.token.email.lower() in
           get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
       }
     }
@@ -80,11 +129,11 @@ service cloud.firestore {
 
       // Invited user can read their invitations
       allow read: if request.auth != null &&
-        request.auth.token.email == resource.data.invitedEmail;
+        request.auth.token.email.lower() == resource.data.invitedEmail;
 
       // Invited user can update (accept/decline), creator can update
       allow update: if request.auth != null &&
-        (request.auth.token.email == resource.data.invitedEmail ||
+        (request.auth.token.email.lower() == resource.data.invitedEmail ||
          request.auth.uid == resource.data.invitedBy);
 
       // Creator can delete

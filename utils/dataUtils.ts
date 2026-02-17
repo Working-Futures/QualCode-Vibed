@@ -46,9 +46,13 @@ export const exportMemos = (project: Project) => {
 };
 
 // --- PDF / Print Logic ---
-export const printTranscript = (transcript: Transcript, project: Project) => {
+export const printTranscript = (transcript: Transcript, project: Project, onError?: (msg: string) => void) => {
   const printWindow = window.open('', '_blank');
-  if (!printWindow) return alert("Please allow popups to print.");
+  if (!printWindow) {
+    if (onError) onError("Please allow popups to print.");
+    else alert("Please allow popups to print.");
+    return;
+  }
 
   const codesHtml = project.codes.map(c =>
     `<div style="display:flex; align-items:center; margin-bottom:4px;">

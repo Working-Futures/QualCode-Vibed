@@ -3,6 +3,11 @@ import { Selection, Code } from '../types';
 export const stripHighlights = (html: string): string => {
   if (!html) return '';
   const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  // Remove UI artifacts (gutters)
+  doc.querySelectorAll('.line-codes-gutter, .line-annotation-gutter').forEach(el => el.remove());
+
+  // Unwrap highlights
   const spans = doc.querySelectorAll('.coded-segment');
   spans.forEach(span => {
     const parent = span.parentNode;
@@ -11,6 +16,8 @@ export const stripHighlights = (html: string): string => {
       parent.removeChild(span);
     }
   });
+
+  // Also remove any empty text nodes or cleanup if needed, but usually redundant
   return doc.body.innerHTML;
 };
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Project, Code, Selection, Transcript, AppSettings, CloudProject, UserProjectData, StickyNote, ChatMessage, DirectMessage } from './types';
+import { Project, Code, Selection, Transcript, AppSettings, CloudProject, UserProjectData, StickyNote, ChatMessage, DirectMessage, CodebookChangeProposal, AppNotification, DocumentSnapshot, VersionControlEvent } from './types';
 import { Editor } from './components/Editor';
 import { CodeTree } from './components/CodeTree';
 import { AnalysisView } from './components/AnalysisView';
@@ -7,8 +7,10 @@ import { Codebook } from './components/Codebook';
 import { VisualSettings } from './components/VisualSettings';
 import { ProjectLauncher } from './components/ProjectLauncher';
 import { MemoSidebar } from './components/MemoSidebar';
-import { StickyNoteBoard } from './components/StickyNoteBoard';
+import { MemosView } from './components/MemosView';
+import { TranscriptNoteLayer, TranscriptNoteLayerHandle } from './components/TranscriptNoteLayer';
 import { CollaborationPanel } from './components/CollaborationPanel';
+import { VersionControlPanel } from './components/VersionControlPanel';
 // import { TranscriptEditorModal } from './components/TranscriptEditorModal';
 import { useAuth } from './contexts/AuthContext';
 import {
@@ -31,15 +33,22 @@ import {
   sendChatMessage,
   subscribeToAllDirectMessages,
   submitChangeRequest,
-  logCodeHistory
+  logCodeHistory,
+  subscribeToNotifications,
+  subscribeToProposals,
+  logVersionControlEvent,
+  saveDocumentSnapshot,
+  sendNotification
 } from './services/firestoreService';
 import { parseTranscriptFile } from './utils/transcriptParser';
 import { exportProjectData, parseCodebookFile, mergeCodesInProject, saveProjectFile, printTranscript, exportCodebook, generateId } from './utils/dataUtils';
 import { removeHighlightsForCode, stripHighlights, restoreHighlights } from './utils/highlightUtils';
 import { generateChildColor, generateColor } from './utils/colorUtils';
 import { applyTheme } from './utils/themeUtils';
+import { reconcileSelectionsAfterEdit } from './utils/selectionReconciler';
 import { addToQueue, processQueue, getQueue } from './utils/offlineQueue';
-import { Eye, Save, LogOut, Trash2, Edit2, FileText, MoreHorizontal, Upload, Plus, StickyNote as StickyNoteIcon, Printer, Download, Cloud, Users, Wifi, WifiOff, Clock } from 'lucide-react';
+import { ConfirmationModal, ModalType } from './components/ConfirmationModal'; // Added import
+import { Eye, Save, LogOut, Trash2, Edit2, FileText, MoreHorizontal, Upload, Plus, StickyNote as StickyNoteIcon, Printer, Download, Cloud, Users, Wifi, WifiOff, Clock, GitPullRequest, Bell } from 'lucide-react';
 
 
 
@@ -70,7 +79,7 @@ export default function App() {
   const { user } = useAuth();
 
   const [project, setProject] = useState<Project | null>(null);
-  const [activeView, setActiveView] = useState<'editor' | 'analysis' | 'codebook'>('editor');
+  const [activeView, setActiveView] = useState<'editor' | 'analysis' | 'codebook' | 'memos'>('editor');
   const [activeTranscriptId, setActiveTranscriptId] = useState<string | null>(null);
   const [history, setHistory] = useState<Project[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
@@ -99,9 +108,92 @@ export default function App() {
   const [showStickyBoard, setShowStickyBoard] = useState(false); // Toggle for sticky note board visibility
   const [showTeamNotes, setShowTeamNotes] = useState(false); // Toggle for team vs personal sticky note visibility
   const [viewingAsUser, setViewingAsUser] = useState<{ id: string, name: string } | null>(null);
+  const [showVersionControl, setShowVersionControl] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+
+  // Confirmation Modal State
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    type?: ModalType;
+    title: string;
+    message: string;
+    showInput?: boolean;
+    inputPlaceholder?: string;
+    inputValue?: string;
+    onConfirm: (value?: string) => void;
+    onCancel: () => void;
+    confirmLabel?: string;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => { },
+    onCancel: () => { }
+  });
+
+  const handleModalInputChange = (val: string) => {
+    setConfirmModal(prev => ({ ...prev, inputValue: val }));
+  };
+
+  const showConfirm = (title: string, message: string, type: ModalType = 'confirm', confirmLabel = 'Confirm'): Promise<boolean> => {
+    return new Promise((resolve) => {
+      setConfirmModal({
+        isOpen: true,
+        title,
+        message,
+        type,
+        confirmLabel,
+        onConfirm: () => {
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          resolve(true);
+        },
+        onCancel: () => {
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          resolve(false);
+        }
+      });
+    });
+  };
+
+  const showAlert = (title: string, message: string) => {
+    setConfirmModal({
+      isOpen: true,
+      title,
+      message,
+      type: 'info',
+      confirmLabel: 'OK',
+      onConfirm: () => setConfirmModal(prev => ({ ...prev, isOpen: false })),
+      onCancel: () => setConfirmModal(prev => ({ ...prev, isOpen: false })),
+    });
+  };
+
+  const showPrompt = (title: string, message: string, defaultValue = ''): Promise<string | null> => {
+    return new Promise((resolve) => {
+      setConfirmModal({
+        isOpen: true,
+        title,
+        message,
+        type: 'confirm',
+        showInput: true,
+        inputValue: defaultValue,
+        inputPlaceholder: '',
+        confirmLabel: 'OK',
+        onConfirm: (val) => {
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          resolve(val !== undefined ? val : defaultValue);
+        },
+        onCancel: () => {
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+          resolve(null);
+        }
+      });
+    });
+  };
 
   // Refs for auto-save logic
   const projectRef = useRef<Project | null>(null);
+  const stickyBoardRef = useRef<TranscriptNoteLayerHandle>(null);
+  const mainWorkspaceRef = useRef<HTMLDivElement>(null);
 
   // Check admin status
   const isProjectAdmin = React.useMemo(() => {
@@ -122,35 +214,57 @@ export default function App() {
   const [globalSearchResults, setGlobalSearchResults] = useState<{ transcriptId: string, lineIndex: number, text: string }[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [codeSearchQuery, setCodeSearchQuery] = useState('');
+  const [sidebarCodeFilter, setSidebarCodeFilter] = useState<'master' | 'personal'>('master');
+  const [hiddenCodeIds, setHiddenCodeIds] = useState<Set<string>>(new Set());
 
   // Subscribe to Collaboration Data (Chat & Sticky Notes & Codes)
+  // Subscribe to Collaboration Data (Chat & Sticky Notes & Codes)
+
+  // 1. Sticky Notes Subscription
   useEffect(() => {
-    if (!cloudProject || !user) return;
-
-    const unsubNotes = subscribeToStickyNotes(cloudProject.id, (notes) => {
-      setStickyNotes(notes);
+    if (!cloudProject?.id) return;
+    console.log('[App] Setting up sticky notes subscription for project', cloudProject.id);
+    const unsub = subscribeToStickyNotes(cloudProject.id, (serverNotes) => {
+      console.log('[App] Received', serverNotes.length, 'notes from Firestore subscription');
+      setStickyNotes(serverNotes);
     });
+    return () => unsub();
+  }, [cloudProject?.id]);
 
-    const unsubChat = subscribeToChatMessages(cloudProject.id, (msgs) => {
-      setChatMessages(msgs);
+  // 2. Chat Messages Subscription
+  useEffect(() => {
+    if (!cloudProject?.id) return;
+    const unsub = subscribeToChatMessages(cloudProject.id, setChatMessages);
+    return () => unsub();
+  }, [cloudProject?.id]);
+
+  // 3. Codes Subscription (shared codes only — merge with personal)
+  useEffect(() => {
+    if (!cloudProject?.id) return;
+    const unsub = subscribeToCodes(cloudProject.id, (sharedCodes) => {
+      // Merge shared codes with user's local personal codes
+      setProject(prev => {
+        if (!prev) return null;
+        const personalCodes = prev.codes.filter(c => c.type === 'personal');
+        return { ...prev, codes: [...sharedCodes, ...personalCodes] };
+      });
     });
+    return () => unsub();
+  }, [cloudProject?.id]);
 
-    const unsubCodes = subscribeToCodes(cloudProject.id, (codes) => {
-      // Update local project codes when cloud codes change
-      setProject(prev => prev ? { ...prev, codes } : null);
-    });
+  // 4. Direct Messages Subscription
+  useEffect(() => {
+    if (!cloudProject?.id || !user?.uid) return;
+    const unsub = subscribeToAllDirectMessages(cloudProject.id, user.uid, setAllDirectMessages);
+    return () => unsub();
+  }, [cloudProject?.id, user?.uid]); // Use primitive user.uid to avoid obj ref churn
 
-    const unsubDms = subscribeToAllDirectMessages(cloudProject.id, user.uid, (msgs) => {
-      setAllDirectMessages(msgs);
-    });
-
-    return () => {
-      unsubNotes();
-      unsubChat();
-      unsubCodes();
-      unsubDms();
-    };
-  }, [cloudProject?.id, user]);
+  // 5. Notifications Subscription (Version Control)
+  useEffect(() => {
+    if (!cloudProject?.id || !user?.uid) return;
+    const unsub = subscribeToNotifications(cloudProject.id, user.uid, setNotifications);
+    return () => unsub();
+  }, [cloudProject?.id, user?.uid]);
 
   // --- Effects ---
 
@@ -274,7 +388,6 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [globalSearchQuery, project]);
 
-  // ─── Cloud Auto-Save (Debounced) ───
   const saveToCloud = useCallback(async (
     currentProject: Project,
     currentCloudProject: CloudProject | null,
@@ -282,22 +395,38 @@ export default function App() {
   ) => {
     if (!currentCloudProject || !currentUser || viewingAsUser) return;
 
+    console.log('[saveToCloud] Starting cloud save...');
     setCloudSyncStatus('saving');
     try {
-      // Save codes (shared codebook)
-      await saveCodes(currentCloudProject.id, currentProject.codes);
+      // Force sticky notes to save pending changes
+      if (stickyBoardRef.current) {
+        console.log('[saveToCloud] Saving sticky notes...');
+        await stickyBoardRef.current.saveAll();
+        console.log('[saveToCloud] Sticky notes saved OK');
+      }
 
-      // Save user-specific data (selections + memos)
+      // Save codes (shared codebook)
+      console.log('[saveToCloud] Saving codes...');
+      await saveCodes(currentCloudProject.id, currentProject.codes);
+      console.log('[saveToCloud] Codes saved OK');
+
+      // Save user-specific data (selections + memos + personal codes)
       const transcriptMemos: Record<string, string> = {};
       currentProject.transcripts.forEach(t => {
         if (t.memo) transcriptMemos[t.id] = t.memo;
       });
 
+      // Separate personal codes for per-user storage
+      const personalCodes = currentProject.codes.filter(c => c.type === 'personal' && c.createdBy === currentUser?.uid);
+
+      console.log('[saveToCloud] Saving user project data...');
       await saveUserProjectData(currentCloudProject.id, currentUser.uid, {
         selections: currentProject.selections,
         transcriptMemos,
         personalMemo: currentProject.projectMemo || '',
+        personalCodes,
       });
+      console.log('[saveToCloud] User project data saved OK');
 
       // Update project metadata
       const updates = {
@@ -306,17 +435,20 @@ export default function App() {
       };
 
       try {
+        console.log('[saveToCloud] Updating cloud project metadata...');
         await updateCloudProject(currentCloudProject.id, updates);
+        console.log('[saveToCloud] Cloud project metadata updated OK');
       } catch (err) {
-        console.warn("Failed immediate update, queueing..."); // Non-blocking if previous passed
+        console.warn("[saveToCloud] Failed immediate update, queueing...", err);
         addToQueue({ type: 'update_project', projectId: currentCloudProject.id, updates });
       }
 
       lastSavedTime.current = currentProject.lastModified;
       setCloudSyncStatus('saved');
+      console.log('[saveToCloud] Cloud save complete!');
       setTimeout(() => setCloudSyncStatus('idle'), 2000);
     } catch (err) {
-      console.warn('Cloud save error - adding to offline queue:', err);
+      console.warn('[saveToCloud] Cloud save error - adding to offline queue:', err);
 
       // Add all core parts to queue
       try {
@@ -327,8 +459,7 @@ export default function App() {
           userId: currentUser.uid,
           data: {
             selections: currentProject.selections,
-            transcriptMemos: {}, // Re-calculated above but scoped there. Re-do here or accept slightly stale if complex.
-            // Actually, reconstructing data is better.
+            transcriptMemos: {},
             personalMemo: currentProject.projectMemo || ''
           }
         });
@@ -342,6 +473,9 @@ export default function App() {
 
   // Online/Offline status listeners
   useEffect(() => {
+    // Process queue immediately on load (in case we have pending offline changes)
+    processQueue();
+
     const handleOnline = () => {
       console.log("Back online, processing queue...");
       processQueue().then((success) => {
@@ -401,16 +535,25 @@ export default function App() {
   // ─── Open Cloud Project ───
   const openCloudProject = async (cp: CloudProject) => {
     if (!user) return;
+    console.log(`[openCloudProject] ▶ Opening cloud project "${cp.name}" (${cp.id})...`);
 
     try {
       // Load all cloud data
-      const [transcripts, codes, userData] = await Promise.all([
+      console.log('[openCloudProject] Step 1: Fetching transcripts, codes, and user data in parallel...');
+      const [transcripts, sharedCodes, userData] = await Promise.all([
         getTranscripts(cp.id),
         getCodes(cp.id),
         getUserProjectData(cp.id, user.uid),
       ]);
+      console.log(`[openCloudProject] Step 1 ✓: ${transcripts.length} transcripts, ${sharedCodes.length} shared codes, ${userData.selections.length} selections`);
+
+      // Merge shared codes with user's personal codes
+      const personalCodes = (userData.personalCodes || []).filter(c => c.type === 'personal');
+      const codes = [...sharedCodes, ...personalCodes];
+      console.log(`[openCloudProject] Merged codes: ${sharedCodes.length} shared + ${personalCodes.length} personal = ${codes.length} total`);
 
       // Convert cloud transcripts to local format
+      console.log('[openCloudProject] Step 2: Restoring highlights on transcripts...');
       const localTranscripts: Transcript[] = transcripts.map(t => ({
         id: t.id,
         name: t.name,
@@ -419,6 +562,7 @@ export default function App() {
         dateAdded: t.dateAdded,
         memo: userData.transcriptMemos[t.id] || '',
       }));
+      console.log(`[openCloudProject] Step 2 ✓: Highlights restored for ${localTranscripts.length} transcripts`);
 
       // Construct a local Project from cloud data
       const localProject: Project = {
@@ -436,12 +580,12 @@ export default function App() {
 
       setCloudProject(cp);
       setProject(localProject);
-      setProject(localProject);
       setActiveTranscriptId(localTranscripts.length > 0 ? localTranscripts[0].id : null);
       setIsEditing(false);
+      console.log(`[openCloudProject] ✅ Cloud project "${cp.name}" opened successfully`);
     } catch (err) {
-      console.error('Error opening cloud project:', err);
-      alert("Error opening cloud project. Please try again.");
+      console.error('[openCloudProject] ❌ Error opening cloud project:', err);
+      showAlert("Error", "Error opening cloud project. Please try again.");
     }
   };
 
@@ -491,9 +635,9 @@ export default function App() {
       const newCodes = await parseCodebookFile(file);
       const uniqueNewCodes = newCodes.filter(nc => !project.codes.some(c => c.name === nc.name));
       handleProjectUpdate({ ...project, codes: [...project.codes, ...uniqueNewCodes] });
-      if (uniqueNewCodes.length < newCodes.length) alert(`Imported ${uniqueNewCodes.length} codes (skipped duplicates).`);
+      if (uniqueNewCodes.length < newCodes.length) showAlert('Import Info', `Imported ${uniqueNewCodes.length} codes (skipped duplicates).`);
     } catch (err) {
-      alert("Failed to parse codebook. Ensure headers are correct.");
+      showAlert('Import Failed', "Failed to parse codebook. Ensure headers are correct.");
     }
   };
 
@@ -527,12 +671,34 @@ export default function App() {
       e.target.value = '';
     } catch (err) {
       console.error(err);
-      alert("Error importing file. Please check the file format.");
+      showAlert('Import Error', "Error importing file. Please check the file format.");
     }
   };
 
-  const deleteTranscriptHandler = (id: string) => {
-    if (confirm("Delete this transcript and all its highlights?")) {
+  const deleteTranscriptHandler = async (id: string) => {
+    // If not admin and cloud project, submit request
+    if (cloudProject && !isProjectAdmin) {
+      const t = project.transcripts.find(tx => tx.id === id);
+      if (await showConfirm('Request Deletion?', `You are not an admin. Do you want to submit a request to delete "${t?.name || 'this transcript'}"?`, 'confirm')) {
+        if (user) {
+          await submitChangeRequest(cloudProject.id, {
+            id: crypto.randomUUID(),
+            projectId: cloudProject.id,
+            transcriptId: id,
+            transcriptName: t?.name || 'Unknown',
+            userId: user.uid,
+            userName: user.displayName || 'User',
+            changeType: 'delete',
+            timestamp: Date.now(),
+            status: 'pending'
+          });
+          showAlert('Request Submitted', 'Your deletion request has been sent to the admins.');
+        }
+      }
+      return;
+    }
+
+    if (await showConfirm("Delete Transcript", "Are you sure you want to delete this transcript and all its highlights?", 'danger')) {
       // If cloud, delete from cloud too
       if (cloudProject) {
         deleteCloudTranscript(cloudProject.id, id).catch(console.error);
@@ -547,11 +713,31 @@ export default function App() {
     }
   };
 
-  const renameTranscript = (id: string) => {
+  const renameTranscript = async (id: string) => {
     const t = project.transcripts.find(tx => tx.id === id);
     if (!t) return;
-    const newName = prompt("Rename transcript:", t.name);
+    const newName = await showPrompt("Rename Transcript", "Enter new name:", t.name);
+
     if (newName && newName.trim()) {
+      if (cloudProject && !isProjectAdmin) {
+        if (user) {
+          await submitChangeRequest(cloudProject.id, {
+            id: crypto.randomUUID(),
+            projectId: cloudProject.id,
+            transcriptId: id,
+            transcriptName: t.name,
+            newName: newName,
+            userId: user.uid,
+            userName: user.displayName || 'User',
+            changeType: 'rename',
+            timestamp: Date.now(),
+            status: 'pending'
+          });
+          showAlert('Request Submitted', 'Your rename request has been sent to the admins.');
+        }
+        return;
+      }
+
       // If cloud, update cloud too
       if (cloudProject) {
         updateCloudTranscript(cloudProject.id, id, { name: newName }).catch(console.error);
@@ -565,6 +751,7 @@ export default function App() {
   };
 
   const handleSelectionCreate = (newSelection: Selection, updatedHtml: string) => {
+    if (viewingAsUser) return;
     handleProjectUpdate({
       ...project,
       selections: [...project.selections, newSelection],
@@ -576,7 +763,7 @@ export default function App() {
   };
 
   const handleSelectionDelete = (selectionId: string, updatedHtml: string) => {
-    if (!activeTranscriptId) return;
+    if (!activeTranscriptId || viewingAsUser) return;
     handleProjectUpdate({
       ...project,
       selections: project.selections.filter(s => s.id !== selectionId),
@@ -619,106 +806,222 @@ export default function App() {
 
     handleProjectUpdate({ ...project, codes: [...project.codes, newCode] });
     setActiveCodeId(newCode.id);
+
+    // Log code creation history & activity
+    if (cloudProject && user) {
+      logCodeHistory(cloudProject.id, {
+        id: crypto.randomUUID(),
+        codeId: newCode.id,
+        projectId: cloudProject.id,
+        previousData: {},
+        newData: newCode,
+        changeType: 'create',
+        userId: user.uid,
+        userName: user.displayName || 'Me',
+        timestamp: Date.now(),
+        description: `Created ${type} code "${newCode.name}"`
+      }).catch(console.error);
+
+      logVersionControlEvent(cloudProject.id, {
+        id: crypto.randomUUID(),
+        projectId: cloudProject.id,
+        eventType: 'code_create',
+        userId: user.uid,
+        userName: user.displayName || 'Me',
+        timestamp: Date.now(),
+        description: `Created ${type} code "${newCode.name}"`
+      }).catch(console.error);
+
+
+    }
   };
 
   const handleCloseProject = async () => {
+    console.log('[handleCloseProject] ▶ Close project requested');
     // Check if project is dirty (unsaved changes)
     const isDirty = project && project.lastModified > lastSavedTime.current;
+    console.log(`[handleCloseProject] isDirty=${isDirty}, isCloud=${!!cloudProject}, viewingAsUser=${!!viewingAsUser}`);
 
     if (cloudProject && user && project && !viewingAsUser) {
       if (isDirty) {
         // If dirty, await the save so we don't close before it finishes
-        // We set status to saving manually just in case ui is still visible
+        console.log('[handleCloseProject] Saving dirty cloud project before close...');
         setCloudSyncStatus('saving');
         await saveToCloud(project, cloudProject, user);
+        console.log('[handleCloseProject] Save completed');
       }
-      // Close immediateley after save (or if clean)
+      // Close immediately after save (or if clean)
       setProject(null);
       setCloudProject(null);
       setShowCollabPanel(false);
       setViewingAsUser(null);
+      console.log('[handleCloseProject] ✅ Cloud project closed');
     } else {
-      // Local Project: Always warn if closing (unless they explicitely handle it, but standard app behavior)
-      if (confirm("Close project? Any unsaved changes will be lost.")) {
+      // Local Project: Always warn if closing
+      if (await showConfirm("Close project?", "Any unsaved changes will be lost.", 'danger')) {
         setProject(null);
         setCloudProject(null);
         setShowCollabPanel(false);
         setViewingAsUser(null);
+        console.log('[handleCloseProject] ✅ Local project closed');
+      } else {
+        console.log('[handleCloseProject] Close cancelled by user');
       }
     }
   };
 
   const handleViewCollaborator = async (userId: string, userName: string) => {
-    if (!cloudProject || !project) return;
+    console.log(`[viewCollaborator] ▶ Starting view for user="${userName}" (${userId})`);
+    if (!cloudProject || !project) {
+      console.warn('[viewCollaborator] Aborted: no cloudProject or project loaded');
+      return;
+    }
+
+    // Step 0: Auto-save current user's data before switching to view mode
+    // This prevents data loss (memos, selections) when the project state is replaced
+    if (user) {
+      console.log('[viewCollaborator] Step 0: Auto-saving current user data before view switch...');
+      try {
+        await saveToCloud(project, cloudProject, user);
+        console.log('[viewCollaborator] Step 0 ✓: Current user data saved');
+      } catch (saveErr) {
+        console.warn('[viewCollaborator] Step 0: Auto-save failed, proceeding anyway:', saveErr);
+      }
+    }
+
     setViewingAsUser({ id: userId, name: userName });
     setIsEditing(false);
+    console.log('[viewCollaborator] Set viewingAsUser and disabled editing');
 
-    // Fetch their data
     try {
+      // Step 1: Fetch the collaborator's user data (selections, memos)
+      console.log(`[viewCollaborator] Step 1: Fetching user project data for ${userId}...`);
       const data = await getUserProjectData(cloudProject.id, userId);
-      if (data) {
-        const updatedTranscripts = project.transcripts.map(t => ({
-          ...t,
-          memo: data.transcriptMemos[t.id] || ''
-        }));
+      console.log(`[viewCollaborator] Step 1 ✓: Got ${data.selections.length} selections, ${Object.keys(data.transcriptMemos).length} transcript memos, personalMemo=${!!data.personalMemo}`);
 
-        setProject({
-          ...project,
-          selections: data.selections,
-          transcripts: updatedTranscripts,
-          projectMemo: data.personalMemo || ''
-        });
-      }
+      // Step 2: Fetch clean transcript content from Firestore (no highlights baked in)
+      console.log('[viewCollaborator] Step 2: Fetching clean transcripts from Firestore...');
+      const cleanTranscripts = await getTranscripts(cloudProject.id);
+      console.log(`[viewCollaborator] Step 2 ✓: Got ${cleanTranscripts.length} clean transcripts`);
+
+      // Step 3: Rebuild transcripts with the collaborator's highlights applied
+      console.log('[viewCollaborator] Step 3: Restoring highlights from collaborator selections...');
+      const updatedTranscripts = project.transcripts.map(t => {
+        // Find the clean version from Firestore
+        const cleanVersion = cleanTranscripts.find(ct => ct.id === t.id);
+        const cleanContent = cleanVersion ? cleanVersion.content : stripHighlights(t.content);
+
+        // Get this user's selections for this transcript
+        const userSelectionsForTranscript = data.selections.filter(s => s.transcriptId === t.id);
+
+        // Apply highlights from collaborator's selections onto clean content
+        const highlightedContent = restoreHighlights(cleanContent, userSelectionsForTranscript, project.codes);
+
+        console.log(`[viewCollaborator]   Transcript "${t.name}": ${userSelectionsForTranscript.length} selections, content restored`);
+
+        return {
+          ...t,
+          content: highlightedContent,
+          memo: data.transcriptMemos[t.id] || ''
+        };
+      });
+
+      // Step 4: Update the project state with the collaborator's view
+      console.log('[viewCollaborator] Step 4: Updating project state with collaborator view...');
+      setProject({
+        ...project,
+        selections: data.selections,
+        transcripts: updatedTranscripts,
+        projectMemo: data.personalMemo || ''
+      });
+      console.log(`[viewCollaborator] ✅ Successfully loaded view for ${userName}`);
+
     } catch (e) {
-      console.error("Error loading user data", e);
-      alert("Failed to load user view.");
+      console.error('[viewCollaborator] ❌ Error loading collaborator data:', e);
+      alert("Failed to load user view. Check the console for details.");
       setViewingAsUser(null);
     }
   };
 
   const handleExitViewMode = async () => {
+    console.log('[exitViewMode] ▶ Exiting view mode...');
     if (!cloudProject || !user || !project) {
+      console.warn('[exitViewMode] Missing cloudProject, user, or project. Clearing viewingAsUser.');
       setViewingAsUser(null);
       return;
     }
 
     setViewingAsUser(null);
-    // Restore my data
-    try {
-      const data = await getUserProjectData(cloudProject.id, user.uid);
-      if (data) {
-        const updatedTranscripts = project.transcripts.map(t => ({
-          ...t,
-          memo: data.transcriptMemos[t.id] || ''
-        }));
+    console.log('[exitViewMode] Cleared viewingAsUser, restoring own data...');
 
-        setProject({
-          ...project,
-          selections: data.selections,
-          transcripts: updatedTranscripts,
-          projectMemo: data.personalMemo || ''
-        });
-      }
+    try {
+      // Step 1: Fetch the current user's data
+      console.log(`[exitViewMode] Step 1: Fetching own user project data (${user.uid})...`);
+      const data = await getUserProjectData(cloudProject.id, user.uid);
+      console.log(`[exitViewMode] Step 1 ✓: Got ${data.selections.length} selections, ${Object.keys(data.transcriptMemos).length} transcript memos`);
+
+      // Step 2: Fetch clean transcript content from Firestore
+      console.log('[exitViewMode] Step 2: Fetching clean transcripts from Firestore...');
+      const cleanTranscripts = await getTranscripts(cloudProject.id);
+      console.log(`[exitViewMode] Step 2 ✓: Got ${cleanTranscripts.length} clean transcripts`);
+
+      // Step 3: Rebuild transcripts with the current user's highlights
+      console.log('[exitViewMode] Step 3: Restoring highlights from own selections...');
+      const updatedTranscripts = project.transcripts.map(t => {
+        const cleanVersion = cleanTranscripts.find(ct => ct.id === t.id);
+        const cleanContent = cleanVersion ? cleanVersion.content : stripHighlights(t.content);
+
+        const mySelectionsForTranscript = data.selections.filter(s => s.transcriptId === t.id);
+        const highlightedContent = restoreHighlights(cleanContent, mySelectionsForTranscript, project.codes);
+
+        console.log(`[exitViewMode]   Transcript "${t.name}": ${mySelectionsForTranscript.length} selections restored`);
+
+        return {
+          ...t,
+          content: highlightedContent,
+          memo: data.transcriptMemos[t.id] || ''
+        };
+      });
+
+      // Step 4: Update project state
+      console.log('[exitViewMode] Step 4: Updating project state with own data...');
+      setProject({
+        ...project,
+        selections: data.selections,
+        transcripts: updatedTranscripts,
+        projectMemo: data.personalMemo || ''
+      });
+      console.log('[exitViewMode] ✅ Successfully restored own view');
+
     } catch (e) {
-      console.error("Error restoring my data", e);
+      console.error('[exitViewMode] ❌ Error restoring own data:', e);
       alert("Error restoring your data. Please reload the project.");
     }
   };
 
   const handleSaveProject = async () => {
-    if (!project) return;
+    console.log('[handleSaveProject] ▶ Manual save triggered');
+    if (!project) {
+      console.warn('[handleSaveProject] No project loaded, aborting');
+      return;
+    }
 
     if (viewingAsUser) {
+      console.warn('[handleSaveProject] In view-only mode, blocking save');
       alert("You are in View Only mode. Exit View Mode to save changes.");
       return;
     }
 
     // If cloud, also do an immediate cloud save
     if (cloudProject && user) {
+      console.log('[handleSaveProject] Cloud project: initiating cloud save...');
       await saveToCloud(project, cloudProject, user);
+      console.log('[handleSaveProject] ✅ Cloud save complete');
     } else {
+      console.log('[handleSaveProject] Local project: exporting file...');
       // Only export local file if NOT a cloud project
       saveProjectFile(project);
+      console.log('[handleSaveProject] ✅ File export complete');
     }
   };
 
@@ -732,7 +1035,7 @@ export default function App() {
             QualCode Vibed
           </span>
           <nav className="flex gap-1 bg-white/10 p-1 rounded-lg">
-            {(['editor', 'codebook', 'analysis'] as const).map(view => (
+            {(['editor', 'codebook', 'analysis', 'memos'] as const).map(view => (
               <button
                 key={view}
                 onClick={() => setActiveView(view)}
@@ -849,6 +1152,30 @@ export default function App() {
             );
           })()}
 
+          {/* Version Control Button */}
+          {cloudProject && (() => {
+            const unreadNotifs = notifications.filter(n => !n.readBy.includes(user?.uid || '')).length;
+            return (
+              <button
+                onClick={() => setShowVersionControl(!showVersionControl)}
+                className={`px-3 py-1.5 rounded transition-colors flex items-center gap-2 text-xs font-bold relative ${showVersionControl
+                  ? 'bg-indigo-600 text-white'
+                  : unreadNotifs > 0
+                    ? 'bg-purple-600 text-white shadow-md animate-pulse' // Turn purple if notifications exist
+                    : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  }`}
+                title="Version Control"
+              >
+                <GitPullRequest size={16} /> VC
+                {unreadNotifs > 0 && (
+                  <span className="absolute -top-1 -right-1 bg-white text-purple-600 text-[9px] font-bold rounded-full min-w-[18px] h-[18px] flex items-center justify-center px-1 ring-2 ring-purple-600">
+                    {unreadNotifs > 99 ? '99+' : unreadNotifs}
+                  </span>
+                )}
+              </button>
+            );
+          })()}
+
           <button
             onClick={() => setShowVisualSettings(!showVisualSettings)}
             className={`px-3 py-1.5 rounded transition-colors flex items-center gap-2 text-xs font-bold ${showVisualSettings ? 'bg-white/20 text-[var(--accent)]' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`}
@@ -895,16 +1222,94 @@ export default function App() {
       )}
 
       {/* Sticky Notes Overlay */}
-      {showStickyBoard && cloudProject && user && (
-        <StickyNoteBoard
-          notes={stickyNotes}
+      {/* Sticky Notes Overlay - Only show in non-editor views (Editor has its own embedded board) */}
+
+
+      {/* Visual Settings Overlay */}
+      {showVisualSettings && (
+        <VisualSettings settings={appSettings} onUpdate={setAppSettings} />
+      )}
+
+      {/* Version Control Panel Overlay (Global) */}
+      {showVersionControl && cloudProject && user && (
+        <VersionControlPanel
           projectId={cloudProject.id}
-          currentUser={user}
-          activeTranscriptId={activeTranscriptId}
-          onClose={() => setShowStickyBoard(false)}
-          showAllUsers={showTeamNotes}
+          currentUserId={user.uid}
+          currentUserName={user.displayName || 'User'}
+          isAdmin={isProjectAdmin}
+          codes={project.codes}
+          onClose={() => setShowVersionControl(false)}
+          onApplyProposal={(proposal) => {
+            // Apply proposal locally
+            if (proposal.action === 'add' && proposal.newCode && proposal.newCode.id) {
+              const newCode = { ...proposal.newCode, type: 'master' as const } as Code;
+              const exists = project.codes.some(c => c.id === newCode.id);
+              if (exists) {
+                // Replace existing (e.g. promoting suggested to master) — removes from suggestions
+                handleProjectUpdate({ ...project, codes: project.codes.map(c => c.id === newCode.id ? newCode : c) });
+              } else {
+                // Add as master, also remove any matching suggested code by name
+                const updatedCodes = project.codes
+                  .filter(c => !(c.type === 'suggested' && c.name === newCode.name && c.createdBy === proposal.proposerId))
+                  .concat(newCode);
+                handleProjectUpdate({ ...project, codes: updatedCodes });
+              }
+            } else if (proposal.action === 'edit' && proposal.targetCodeId && proposal.proposedData) {
+              handleProjectUpdate({
+                ...project,
+                codes: project.codes.map(c => c.id === proposal.targetCodeId ? { ...c, ...proposal.proposedData } : c)
+              });
+            } else if (proposal.action === 'delete' && proposal.deleteCodeId) {
+              handleProjectUpdate({
+                ...project,
+                codes: project.codes.filter(c => c.id !== proposal.deleteCodeId)
+              });
+            } else if (proposal.action === 'merge' && proposal.mergeSourceId && proposal.mergeTargetId) {
+              handleProjectUpdate(mergeCodesInProject(project, proposal.mergeSourceId, proposal.mergeTargetId));
+            }
+          }}
+          onUpdateCodes={(newCodes) => handleProjectUpdate({ ...project, codes: newCodes })}
+          onRestoreSnapshot={(snapshot) => {
+            if (snapshot.transcriptId) {
+              // Restore transcript content locally
+              handleProjectUpdate({
+                ...project,
+                transcripts: project.transcripts.map(t => t.id === snapshot.transcriptId ? { ...t, content: snapshot.content } : t)
+              });
+              setActiveTranscriptId(snapshot.transcriptId);
+              setActiveView('editor');
+              setShowVersionControl(false);
+            }
+          }}
+          onNavigateToCode={(codeId, type) => {
+            // Switch to Codebook view and select the code
+            setActiveView('codebook');
+            setActiveCodeId(codeId);
+            // Suggested codes appear under the master filter in the sidebar
+            setSidebarCodeFilter(type === 'personal' ? 'personal' : 'master');
+            setShowVersionControl(false);
+          }}
         />
       )}
+      {/* View Mode Banner */}
+      {viewingAsUser && (
+        <div className="bg-indigo-600 text-white px-4 py-2 text-sm font-bold flex justify-between items-center shadow-md z-40 shrink-0">
+          <div className="flex items-center gap-2">
+            <Eye size={16} />
+            Viewing as {viewingAsUser.name} (Read Only)
+          </div>
+          <button
+            onClick={handleExitViewMode}
+            className="bg-white text-indigo-600 px-3 py-1 rounded text-xs hover:bg-indigo-50"
+          >
+            Exit View
+          </button>
+        </div>
+      )}
+
+      {/* Sticky Notes Overlay */}
+      {/* Sticky Notes Overlay - Only show in non-editor views (Editor has its own embedded board) */}
+
 
       {/* Visual Settings Overlay */}
       {showVisualSettings && (
@@ -912,11 +1317,28 @@ export default function App() {
       )}
 
       {/* Main Workspace */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden relative" ref={mainWorkspaceRef}>
+
+        {/* Sticky Notes Layer */}
+        {cloudProject && user && activeView !== 'editor' && showStickyBoard && <TranscriptNoteLayer
+          ref={stickyBoardRef}
+          notes={stickyNotes}
+          projectId={cloudProject.id}
+          currentUser={viewingAsUser ? { uid: viewingAsUser.id, displayName: viewingAsUser.name } : user}
+          activeTranscriptId={activeTranscriptId}
+          codebookFilter={sidebarCodeFilter}
+          onSyncStatusChange={setCloudSyncStatus}
+          showTeamNotes={showTeamNotes}
+          containerRef={mainWorkspaceRef}
+          readOnly={!!viewingAsUser}
+          onConfirm={(title, msg, cb) => showConfirm(title, msg, 'confirm').then(ok => ok && cb())}
+        />
+        }
 
         {/* Left Sidebar */}
-        {activeView !== 'analysis' && (
+        {activeView !== 'analysis' && activeView !== 'memos' && (
           <div className="border-r border-[var(--border)] bg-[var(--bg-panel)] flex flex-col shadow-inner z-10 shrink-0 transition-all duration-200" style={{ width: sidebarWidth }}>
+
 
             {/* Transcripts List */}
             <div className="flex-shrink-0 border-b border-[var(--border)] flex flex-col max-h-[40%]">
@@ -965,11 +1387,32 @@ export default function App() {
                   >
                     <Download size={14} />
                   </button>
-                  <button onClick={() => createCode()} className="hover:bg-[var(--bg-main)] p-1 rounded text-[var(--text-muted)] hover:text-[var(--accent)]" title="Create Code (Select existing to nest)">
+                  <button onClick={() => {
+                    let type: 'master' | 'personal' | 'suggested' = !cloudProject ? 'personal' : sidebarCodeFilter as any;
+                    // If non-admin is on master tab, create a suggested code instead
+                    if (cloudProject && type === 'master' && !isProjectAdmin) {
+                      type = 'suggested';
+                    }
+                    createCode(type);
+                  }} className="hover:bg-[var(--bg-main)] p-1 rounded text-[var(--text-muted)] hover:text-[var(--accent)]" title={cloudProject ? (sidebarCodeFilter === 'master' ? (isProjectAdmin ? 'Create Master Code' : 'Create Suggested Code') : 'Create Personal Code') : 'Create Code'}>
                     <Plus size={14} />
                   </button>
                 </div>
               </div>
+
+              {/* Codebook Type Dropdown */}
+              {cloudProject && (
+                <div className="px-3 pb-2">
+                  <select
+                    value={sidebarCodeFilter}
+                    onChange={(e) => setSidebarCodeFilter(e.target.value as 'master' | 'personal')}
+                    className="w-full text-xs font-semibold p-1.5 rounded border border-[var(--border)] bg-[var(--bg-main)] text-[var(--text-main)] focus:ring-1 focus:ring-[var(--accent)] focus:border-[var(--accent)] cursor-pointer"
+                  >
+                    <option value="master">Master Codebook</option>
+                    <option value="personal">Personal Codebook</option>
+                  </select>
+                </div>
+              )}
 
               {/* Code Search Bar */}
               <div className="px-3 pb-2">
@@ -995,8 +1438,21 @@ export default function App() {
                 onClick={() => setActiveCodeId(null)}
               >
                 <CodeTree
-                  codes={project.codes}
+                  codes={!cloudProject ? project.codes : project.codes.filter(c => {
+                    const type = c.type || 'personal';
+                    if (sidebarCodeFilter === 'master') return type === 'master' || type === 'suggested';
+                    return type === 'personal';
+                  })}
                   activeCodeId={activeCodeId}
+                  hiddenCodeIds={hiddenCodeIds}
+                  onToggleVisibility={(id) => {
+                    setHiddenCodeIds(prev => {
+                      const next = new Set(prev);
+                      if (next.has(id)) next.delete(id);
+                      else next.add(id);
+                      return next;
+                    });
+                  }}
                   onSelectCode={(id) => { setActiveCodeId(id); }}
                   onUpdateCode={(id, up) => handleProjectUpdate({ ...project, codes: project.codes.map(c => c.id === id ? { ...c, ...up } : c) })}
                   onDeleteCode={(id) => {
@@ -1009,6 +1465,11 @@ export default function App() {
                   }}
                   onMergeCode={(src, tgt) => handleProjectUpdate(mergeCodesInProject(project, src, tgt))}
                   searchQuery={codeSearchQuery}
+                  onConfirm={(title, message, callback) => {
+                    showConfirm(title, message, 'confirm').then(confirmed => {
+                      if (confirmed) callback();
+                    });
+                  }}
                 />
               </div>
 
@@ -1033,7 +1494,7 @@ export default function App() {
                 <div className="w-px h-4 bg-[var(--border)] mx-1"></div>
 
                 <button
-                  onClick={() => activeTranscript && printTranscript(activeTranscript, project)}
+                  onClick={() => activeTranscript && printTranscript(activeTranscript, project, (msg) => showAlert('Popup Blocked', msg))}
                   className="text-xs font-bold flex items-center gap-1 px-2 py-1 rounded text-[var(--text-muted)] hover:bg-[var(--bg-main)]"
                   title="Export PDF / Print"
                 >
@@ -1049,6 +1510,8 @@ export default function App() {
               <div className="flex-1 overflow-hidden flex">
                 <div className="flex-1">
                   <Editor
+                    onAlert={showAlert}
+                    onConfirm={(title, msg, cb) => showConfirm(title, msg, 'confirm').then(ok => ok && cb())}
                     activeTranscript={activeTranscript}
                     activeCode={activeCode}
                     onSelectionCreate={handleSelectionCreate}
@@ -1056,11 +1519,20 @@ export default function App() {
                     onSaveProject={handleSaveProject}
                     onCreateInVivoCode={(text, transcriptId) => {
                       // In-vivo coding: create a new code named after the selected text
+                      const type = (sidebarCodeFilter === 'master' && isProjectAdmin) ? 'master' : 'personal';
+
+                      // If creating a personal code while in master view, switch view so user sees it
+                      if (sidebarCodeFilter === 'master' && type === 'personal') {
+                        setSidebarCodeFilter('personal');
+                      }
+
                       const newCode: Code = {
                         id: generateId(),
                         name: text.substring(0, 50),
                         color: generateColor(project.codes.filter(c => !c.parentId).length),
-                        description: `In-vivo code created from: "${text}"`
+                        description: `In-vivo code created from: "${text}"`,
+                        type,
+                        createdBy: user?.uid
                       };
                       handleProjectUpdate({ ...project, codes: [...project.codes, newCode] });
                       setActiveCodeId(newCode.id);
@@ -1076,25 +1548,98 @@ export default function App() {
                     settings={appSettings}
                     codes={project.codes}
                     selections={project.selections}
+                    codebookFilter={sidebarCodeFilter}
+                    hiddenCodeIds={hiddenCodeIds}
                     // Editor Props
                     canEditDirectly={isProjectAdmin}
                     readOnly={!!viewingAsUser}
                     isEditing={isEditing}
-                    onSaveContent={(newContent) => {
+                    onSaveContent={async (newContent) => {
                       if (!!viewingAsUser) return; // Guard against saving in read-only mode
                       if (!activeTranscriptId) return;
+
+                      // Change Control for Non-Admins
+                      if (cloudProject && !isProjectAdmin) {
+                        if (activeTranscript && activeTranscript.content !== newContent) {
+                          // Prompt user for description? Or just submit.
+                          if (await showConfirm('Submit Changes?', 'You are a non-admin. Your changes will be submitted for review.', 'confirm')) {
+                            await submitChangeRequest(cloudProject.id, {
+                              id: crypto.randomUUID(),
+                              projectId: cloudProject.id,
+                              transcriptId: activeTranscriptId,
+                              transcriptName: activeTranscript.name,
+                              userId: user?.uid || 'unknown',
+                              userName: user?.displayName || 'User',
+                              changeType: 'edit',
+                              content: newContent,
+                              originalContent: activeTranscript.content,
+                              timestamp: Date.now(),
+                              status: 'pending'
+                            });
+                            showAlert("Changes Submitted", "Your edits have been sent to the admins for review.");
+                            setIsEditing(false); // Exit edit mode
+                          }
+                        }
+                        return;
+                      }
+
                       // If cloud project, update transcript content in cloud immediately
                       if (cloudProject) {
                         updateCloudTranscript(cloudProject.id, activeTranscriptId, { content: newContent }).catch(console.error);
+
+                        // Save a document snapshot for version history
+                        if (isProjectAdmin && activeTranscript) {
+                          saveDocumentSnapshot(cloudProject.id, {
+                            id: crypto.randomUUID(),
+                            projectId: cloudProject.id,
+                            transcriptId: activeTranscriptId,
+                            transcriptName: activeTranscript.name,
+                            content: activeTranscript.content, // Save the OLD content as snapshot
+                            savedBy: user?.uid || 'unknown',
+                            savedByName: user?.displayName || 'Admin',
+                            timestamp: Date.now(),
+                            description: 'Before admin edit',
+                            version: Date.now()
+                          }).catch(console.error);
+
+                          // Log activity
+                          logVersionControlEvent(cloudProject.id, {
+                            id: crypto.randomUUID(),
+                            projectId: cloudProject.id,
+                            eventType: 'document_edit',
+                            userId: user?.uid || 'unknown',
+                            userName: user?.displayName || 'Admin',
+                            timestamp: Date.now(),
+                            description: `Edited document "${activeTranscript.name}"`
+                          }).catch(console.error);
+
+                          // Notify everyone about the document change
+                          sendNotification(cloudProject.id, {
+                            id: crypto.randomUUID(),
+                            projectId: cloudProject.id,
+                            type: 'document_change',
+                            title: 'Document Edited',
+                            message: `${user?.displayName || 'Admin'} edited "${activeTranscript.name}". You can accept or reject this change.`,
+                            timestamp: Date.now(),
+                            fromUserId: user?.uid || 'unknown',
+                            fromUserName: user?.displayName || 'Admin',
+                            targetUserIds: [],
+                            readBy: [user?.uid || ''],
+                            relatedEntityId: activeTranscriptId,
+                            relatedEntityType: 'transcript'
+                          }).catch(console.error);
+                        }
                       }
 
                       const updatedTranscript = { ...activeTranscript!, content: newContent };
 
-                      // Update project with new content and remove selections for this transcript (since they are now invalid)
+                      // Update project with new content — reconcile selections, preserving codes on unmodified lines
                       handleProjectUpdate({
                         ...project,
                         transcripts: project.transcripts.map(t => t.id === activeTranscriptId ? updatedTranscript : t),
-                        selections: project.selections.filter(s => s.transcriptId !== activeTranscriptId)
+                        selections: reconcileSelectionsAfterEdit(
+                          activeTranscript!.content, newContent, project.selections, activeTranscriptId
+                        )
                       });
                       setIsEditing(false);
                     }}
@@ -1107,6 +1652,21 @@ export default function App() {
 
                       // If cloud project, update transcript content in cloud immediately
                       if (cloudProject) {
+                        // Non-admin check for Request Submission (Change Control)
+                        if (!isProjectAdmin) {
+                          // For now, we allow auto-save while typing to NOT trigger requests repeatedly.
+                          // But for the final save (ctrl+s or explicit), we trigger request.
+                          // However, onAutoSave fires frequently. We should ONLY intercept explicit saves or handle this carefully.
+                          // ACTUALLY: The prompt says "On document edit come up with a similar proposition."
+                          // If we block autosave for non-admins, they lose their work if they don't hit save.
+                          // Better strategy: Let them edit locally, but when it *saves to cloud* (sync), intercept?
+                          // No, onSaveContent is called on Ctrl+S or explicit save.
+                          // onAutoSave is called periodically.
+                          // We should probably BLOCK direct cloud updates in onAutoSave if !admin?
+                          // If !admin, we can't updateCloudTranscript.
+                          return; // Do nothing for auto-save if non-admin to prevent unauthorized writes log spam
+                        }
+
                         // We don't set global 'saving' status here to avoid UI flickering, 
                         // but we could. For now, rely on the fact that handleProjectUpdate triggers the main auto-save loop 
                         // which WILL trigger saveToCloud (metadata). 
@@ -1114,44 +1674,27 @@ export default function App() {
                         if (isProjectAdmin) {
                           updateCloudTranscript(cloudProject.id, activeTranscriptId, { content: newContent }).catch(console.error);
                         } else {
-                          // Submit Change Request for non-admins
-                          const request = {
-                            id: crypto.randomUUID(),
-                            projectId: cloudProject.id,
-                            transcriptId: activeTranscriptId,
-                            transcriptName: activeTranscript?.name || 'Unknown',
-                            userId: user?.uid || 'unknown',
-                            userName: user?.displayName || 'Anonymous',
-                            content: newContent,
-                            originalContent: activeTranscript?.content || '',
-                            timestamp: Date.now(),
-                            status: 'pending' as const
-                          };
-                          submitChangeRequest(cloudProject.id, request).then(() => {
-                            alert("Since you are not an admin, your changes have been submitted as a request.");
-                            setIsEditing(false);
-                          }).catch(err => {
-                            console.error("Failed to submit request", err);
-                            alert("Failed to submit change request.");
-                          });
                           return; // Stop here, do not update local state
                         }
                       }
 
                       const updatedTranscript = { ...activeTranscript!, content: newContent };
 
-                      // Update project with new content WITHOUT adding to history stack (debounce handles history if needed, or we just don't history auto-saves)
-                      // We also remove selections because offsets are invalid.
+                      // Update project with new content — reconcile selections, preserving codes on unmodified lines
                       handleProjectUpdate({
                         ...project,
                         transcripts: project.transcripts.map(t => t.id === activeTranscriptId ? updatedTranscript : t),
-                        selections: project.selections.filter(s => s.transcriptId !== activeTranscriptId)
+                        selections: reconcileSelectionsAfterEdit(
+                          activeTranscript!.content, newContent, project.selections, activeTranscriptId
+                        )
                       }, false); // false = don't add to history
                     }}
 
                     // Sticky Notes
                     stickyNotes={stickyNotes}
                     showTeamNotes={showTeamNotes}
+                    showStickyBoard={showStickyBoard}
+                    onCloseStickyBoard={() => setShowStickyBoard(false)}
                     currentUserId={viewingAsUser ? viewingAsUser.id : user?.uid}
                     onAddStickyNote={(note) => {
                       if (!!viewingAsUser) return; // Prevent adding notes as another user
@@ -1172,6 +1715,7 @@ export default function App() {
                         deleteStickyNote(cloudProject.id, id).catch(console.error);
                       }
                     }}
+                    projectId={cloudProject?.id}
                   />
                 </div>
               </div>
@@ -1181,6 +1725,15 @@ export default function App() {
           {activeView === 'codebook' && (
             <Codebook
               codes={project.codes}
+              hiddenCodeIds={hiddenCodeIds}
+              onToggleVisibility={(id) => {
+                setHiddenCodeIds(prev => {
+                  const next = new Set(prev);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  return next;
+                });
+              }}
               onUpdateCode={(id, up) => {
                 const oldCode = project.codes.find(c => c.id === id);
                 handleProjectUpdate({ ...project, codes: project.codes.map(c => c.id === id ? { ...c, ...up } : c) });
@@ -1203,7 +1756,12 @@ export default function App() {
               }}
               onDeleteCode={(id) => {
                 const code = project.codes.find(c => c.id === id);
-                handleProjectUpdate({ ...project, codes: project.codes.filter(c => c.id !== id) });
+                handleProjectUpdate({
+                  ...project,
+                  codes: project.codes.filter(c => c.id !== id),
+                  selections: project.selections.filter(s => s.codeId !== id),
+                  transcripts: project.transcripts.map(t => ({ ...t, content: removeHighlightsForCode(t.content, id) }))
+                });
                 if (cloudProject && user && code) {
                   logCodeHistory(cloudProject.id, {
                     id: crypto.randomUUID(),
@@ -1242,7 +1800,7 @@ export default function App() {
                 }
               }}
               currentUser={user || undefined}
-              isAdmin={!!cloudProject && cloudProject.ownerId === user?.uid}
+              isAdmin={isProjectAdmin}
               projectId={cloudProject?.id}
             />
           )}
@@ -1257,6 +1815,16 @@ export default function App() {
               cloudProject={cloudProject}
             />
           )}
+
+          {activeView === 'memos' && (
+            <MemosView
+              project={project}
+              onUpdateProject={handleProjectUpdate}
+              cloudProjectId={cloudProject?.id}
+              currentUserId={user?.uid}
+              readOnly={!!viewingAsUser}
+            />
+          )}
         </div>
 
         {/* Right Sidebar */}
@@ -1266,33 +1834,135 @@ export default function App() {
             activeTranscript={activeTranscript}
             onUpdateProject={handleProjectUpdate}
             onClose={() => setShowMemoSidebar(false)}
+            readOnly={!!viewingAsUser}
           />
         )}
 
       </div>
 
       {/* Collaboration Panel (Cloud projects only) */}
-      {showCollabPanel && cloudProject && user && (
-        <CollaborationPanel
-          cloudProject={cloudProject}
+      {/* Collaboration Panel (Cloud projects only) - Kept mounted to prevent listener crash on unmount */}
+      {cloudProject && user && (
+        <div className={showCollabPanel ? "block" : "hidden"}>
+          <CollaborationPanel
+            cloudProject={cloudProject}
+            currentUserId={user.uid}
+            codes={project.codes}
+            transcripts={project.transcripts}
+            chatMessages={chatMessages}
+            allDirectMessages={allDirectMessages}
+            onSendMessage={async (content, replyTo, mentions) => {
+              if (user && cloudProject) {
+                await sendChatMessage(cloudProject.id, {
+                  id: crypto.randomUUID(),
+                  content,
+                  projectId: cloudProject.id,
+                  senderId: user.uid,
+                  senderName: user.displayName || 'User',
+                  timestamp: Date.now(),
+                  readBy: [user.uid],
+                  ...(replyTo ? { replyTo } : {}),
+                  ...(mentions ? { mentions } : {})
+                });
+              }
+            }}
+            onClose={() => setShowCollabPanel(false)}
+            onViewCollaborator={handleViewCollaborator}
+          />
+        </div>
+      )}
+
+      {/* Version Control Panel */}
+      {showVersionControl && cloudProject && user && project && (
+        <VersionControlPanel
+          projectId={cloudProject.id}
           currentUserId={user.uid}
+          currentUserName={user.displayName || 'User'}
+          isAdmin={isProjectAdmin}
           codes={project.codes}
-          transcripts={project.transcripts}
-          chatMessages={chatMessages}
-          allDirectMessages={allDirectMessages}
-          onSendMessage={(content, replyTo, mentions) => user && cloudProject && sendChatMessage(cloudProject.id, {
-            id: crypto.randomUUID(),
-            content,
-            projectId: cloudProject.id,
-            senderId: user.uid,
-            senderName: user.displayName || 'User',
-            timestamp: Date.now(),
-            readBy: [user.uid],
-            ...(replyTo ? { replyTo } : {}),
-            ...(mentions ? { mentions } : {})
-          })}
-          onClose={() => setShowCollabPanel(false)}
-          onViewCollaborator={handleViewCollaborator}
+          onClose={() => setShowVersionControl(false)}
+          onApplyProposal={(proposal) => {
+            if (!project) return;
+            let updatedProject = { ...project };
+
+            switch (proposal.action) {
+              case 'add':
+                if (proposal.newCode) {
+                  const newCode: Code = {
+                    id: generateId(),
+                    name: proposal.newCode.name || 'New Code',
+                    color: proposal.newCode.color || '#888888',
+                    type: 'master',
+                    createdBy: proposal.proposerId,
+                    description: proposal.newCode.description
+                  };
+                  updatedProject = { ...updatedProject, codes: [...updatedProject.codes, newCode] };
+                }
+                break;
+              case 'edit':
+                if (proposal.targetCodeId && proposal.proposedData) {
+                  updatedProject = {
+                    ...updatedProject,
+                    codes: updatedProject.codes.map(c =>
+                      c.id === proposal.targetCodeId ? { ...c, ...proposal.proposedData } : c
+                    )
+                  };
+                }
+                break;
+              case 'delete':
+                if (proposal.deleteCodeId) {
+                  updatedProject = {
+                    ...updatedProject,
+                    codes: updatedProject.codes.filter(c => c.id !== proposal.deleteCodeId)
+                  };
+                }
+                break;
+              case 'merge':
+                if (proposal.mergeSourceId && proposal.mergeTargetId) {
+                  updatedProject = mergeCodesInProject(updatedProject, proposal.mergeSourceId, proposal.mergeTargetId);
+                }
+                break;
+            }
+            handleProjectUpdate(updatedProject);
+
+            // Log version control event
+            logVersionControlEvent(cloudProject.id, {
+              id: crypto.randomUUID(),
+              projectId: cloudProject.id,
+              eventType: proposal.action === 'add' ? 'code_create' :
+                proposal.action === 'edit' ? 'code_edit' :
+                  proposal.action === 'delete' ? 'code_delete' :
+                    proposal.action === 'merge' ? 'code_merge' : 'proposal',
+              userId: user.uid,
+              userName: user.displayName || 'Admin',
+              timestamp: Date.now(),
+              description: `Accepted ${proposal.action} proposal from ${proposal.proposerName}`
+            }).catch(console.error);
+
+            // Notify everyone about the codebook change
+            sendNotification(cloudProject.id, {
+              id: crypto.randomUUID(),
+              projectId: cloudProject.id,
+              type: 'codebook_change',
+              title: 'Codebook Updated',
+              message: `${user.displayName || 'Admin'} applied a ${proposal.action} change to the master codebook (proposed by ${proposal.proposerName}).`,
+              timestamp: Date.now(),
+              fromUserId: user.uid,
+              fromUserName: user.displayName || 'Admin',
+              targetUserIds: [],
+              readBy: [user.uid]
+            }).catch(console.error);
+          }}
+          onUpdateCodes={(newCodes) => {
+            if (project) handleProjectUpdate({ ...project, codes: newCodes });
+          }}
+          onRestoreSnapshot={(snapshot) => {
+            if (!project) return;
+            const updatedTranscripts = project.transcripts.map(t =>
+              t.id === snapshot.transcriptId ? { ...t, content: snapshot.content } : t
+            );
+            handleProjectUpdate({ ...project, transcripts: updatedTranscripts });
+          }}
         />
       )}
 
@@ -1309,7 +1979,7 @@ export default function App() {
             <button
               onClick={() => {
                 if (viewingAsUser) {
-                  alert("Cannot edit in view-only mode.");
+                  showAlert("View Only", "Cannot edit in view-only mode.");
                   return;
                 }
                 if (transcriptMenu.id !== activeTranscriptId) {
@@ -1337,6 +2007,21 @@ export default function App() {
           </div>
         </>
       )}
+
+      {/* Modal Container */}
+      <ConfirmationModal
+        isOpen={confirmModal.isOpen}
+        type={confirmModal.type}
+        title={confirmModal.title}
+        message={confirmModal.message}
+        onConfirm={confirmModal.onConfirm}
+        onCancel={confirmModal.onCancel}
+        showInput={confirmModal.showInput}
+        inputPlaceholder={confirmModal.inputPlaceholder}
+        inputValue={confirmModal.inputValue}
+        onInputChange={handleModalInputChange}
+        confirmLabel={confirmModal.confirmLabel}
+      />
 
     </div>
   );
