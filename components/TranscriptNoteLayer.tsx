@@ -308,7 +308,7 @@ export const TranscriptNoteLayer = React.forwardRef<TranscriptNoteLayerHandle, P
         const idsToSave = Array.from(unsavedChanges.current);
         if (idsToSave.length === 0) return;
 
-        console.log(`[TranscriptNoteLayer] Force saving ${idsToSave.length} notes...`);
+
         await Promise.all(idsToSave.map(id => handleSave(id)));
     };
 

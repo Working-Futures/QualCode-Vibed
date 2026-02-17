@@ -39,6 +39,8 @@ import {
     DocumentSnapshot,
     VersionControlEvent
 } from '../types';
+import { createTextPatch, applyTextPatch } from '../utils/diffUtils';
+import { compressTranscriptContent, hydrateTranscriptContent } from '../utils/transcriptOptimizer';
 
 // ─── User Profile ───
 
@@ -143,16 +145,27 @@ export async function saveTranscript(
     projectId: string,
     transcript: CloudTranscript
 ): Promise<void> {
+    const optimizedTranscript = {
+        ...transcript,
+        content: compressTranscriptContent(transcript.content)
+    };
     await setDoc(
         doc(db, 'projects', projectId, 'transcripts', transcript.id),
-        transcript
+        optimizedTranscript
     );
 }
 
 export async function getTranscripts(projectId: string): Promise<CloudTranscript[]> {
     const snap = await getDocs(collection(db, 'projects', projectId, 'transcripts'));
-    return snap.docs.map((d) => d.data() as CloudTranscript);
+    return snap.docs.map((d) => {
+        const data = d.data() as CloudTranscript;
+        return {
+            ...data,
+            content: hydrateTranscriptContent(data.content)
+        };
+    });
 }
+
 
 export async function deleteTranscript(
     projectId: string,
@@ -166,11 +179,16 @@ export async function updateTranscript(
     transcriptId: string,
     updates: Partial<CloudTranscript>
 ): Promise<void> {
+    const optimizedUpdates = { ...updates };
+    if (updates.content) {
+        optimizedUpdates.content = compressTranscriptContent(updates.content);
+    }
     await updateDoc(
         doc(db, 'projects', projectId, 'transcripts', transcriptId),
-        updates
+        optimizedUpdates
     );
 }
+
 
 // ─── Codes (Shared Codebook) ───
 
@@ -190,13 +208,7 @@ export async function saveCodes(projectId: string, codes: Code[]): Promise<void>
     // Delete codes that no longer exist in the shared set
     // REFACTOR: We DO NOT delete codes here anymore to prevent accidental data loss 
     // if the client has a stale state. Deletions must be explicit via deleteSharedCode.
-    /* 
-    existing.docs.forEach((d) => {
-        if (!newIds.has(d.id)) {
-            batch.delete(d.ref);
-        }
-    }); 
-    */
+
 
     // Create or update current shared codes
     sharedCodes.forEach((code) => {
@@ -255,15 +267,15 @@ export async function getUserProjectData(
     projectId: string,
     userId: string
 ): Promise<UserProjectData> {
-    console.log(`[firestoreService.getUserProjectData] Fetching data for user=${userId} in project=${projectId}`);
+
     try {
         const snap = await getDoc(doc(db, 'projects', projectId, 'userdata', userId));
         if (snap.exists()) {
             const data = snap.data() as UserProjectData;
-            console.log(`[firestoreService.getUserProjectData] ✓ Found data: ${data.selections?.length || 0} selections, ${Object.keys(data.transcriptMemos || {}).length} transcript memos`);
+
             return data;
         }
-        console.log(`[firestoreService.getUserProjectData] No userdata document found for user=${userId}, returning defaults`);
+
         return { selections: [], transcriptMemos: {}, personalMemo: '' };
     } catch (err) {
         console.error(`[firestoreService.getUserProjectData] ❌ Error fetching data for user=${userId}:`, err);
@@ -275,7 +287,7 @@ export async function getAllCollaboratorData(
     projectId: string,
     excludeUserId?: string
 ): Promise<CollaboratorData[]> {
-    console.log(`[firestoreService.getAllCollaboratorData] Fetching all collaborator data for project=${projectId}, excluding=${excludeUserId || 'none'}`);
+
     try {
         const snap = await getDocs(collection(db, 'projects', projectId, 'userdata'));
         const projectSnap = await getDoc(doc(db, 'projects', projectId));
@@ -293,7 +305,7 @@ export async function getAllCollaboratorData(
                     ...data,
                 };
             });
-        console.log(`[firestoreService.getAllCollaboratorData] ✓ Got ${result.length} collaborators with data`);
+
         return result;
     } catch (err) {
         console.error(`[firestoreService.getAllCollaboratorData] ❌ Error:`, err);
@@ -424,14 +436,21 @@ export function listenToTranscripts(
     return onSnapshot(
         collection(db, 'projects', projectId, 'transcripts'),
         (snap) => {
-            callback(snap.docs.map((d) => d.data() as CloudTranscript));
+            const transcripts = snap.docs.map((d) => {
+                const data = d.data() as CloudTranscript;
+                return {
+                    ...data,
+                    content: hydrateTranscriptContent(data.content)
+                };
+            });
+            callback(transcripts);
         }
     );
 }
 // ─── Sticky Notes ───
 
 export async function addStickyNote(projectId: string, note: StickyNote): Promise<void> {
-    console.log('[StickyNote] addStickyNote called', { projectId, noteId: note.id, note });
+
     const ref = doc(db, 'projects', projectId, 'notes', note.id);
     // Strip undefined fields to avoid any Firestore issues
     const cleanNote: Record<string, any> = {};
@@ -442,7 +461,7 @@ export async function addStickyNote(projectId: string, note: StickyNote): Promis
     }
     try {
         await setDoc(ref, cleanNote);
-        console.log('[StickyNote] addStickyNote SUCCESS', note.id);
+
     } catch (err) {
         console.error('[StickyNote] addStickyNote FAILED', note.id, err);
         throw err;
@@ -450,7 +469,7 @@ export async function addStickyNote(projectId: string, note: StickyNote): Promis
 }
 
 export async function updateStickyNote(projectId: string, noteId: string, updates: Partial<StickyNote>): Promise<void> {
-    console.log('[StickyNote] updateStickyNote called', { projectId, noteId, updates });
+
     const ref = doc(db, 'projects', projectId, 'notes', noteId);
     // Strip undefined fields
     const cleanUpdates: Record<string, any> = {};
@@ -461,7 +480,7 @@ export async function updateStickyNote(projectId: string, noteId: string, update
     }
     try {
         await setDoc(ref, cleanUpdates, { merge: true });
-        console.log('[StickyNote] updateStickyNote SUCCESS', noteId);
+
     } catch (err) {
         console.error('[StickyNote] updateStickyNote FAILED', noteId, err);
         throw err;
@@ -473,13 +492,13 @@ export async function deleteStickyNote(projectId: string, noteId: string): Promi
 }
 
 export function subscribeToStickyNotes(projectId: string, callback: (notes: StickyNote[]) => void): Unsubscribe {
-    console.log('[StickyNote] Subscribing to notes for project', projectId);
+
     const q = query(collection(db, 'projects', projectId, 'notes'));
     return onSnapshot(q, (snapshot) => {
         const notes = snapshot.docs.map(d => d.data() as StickyNote);
-        console.log('[StickyNote] onSnapshot fired, notes count:', notes.length, 'fromCache:', snapshot.metadata.fromCache, 'hasPendingWrites:', snapshot.metadata.hasPendingWrites);
+
         if (notes.length > 0) {
-            console.log('[StickyNote] Note IDs:', notes.map(n => n.id));
+
         }
         callback(notes);
     }, (error) => {
@@ -499,15 +518,27 @@ export async function sendChatMessage(projectId: string, message: ChatMessage): 
 export async function updateChatMessage(projectId: string, messageId: string, updates: Partial<ChatMessage>, previousContent?: string): Promise<void> {
     const ref = doc(db, 'projects', projectId, 'chat', messageId);
     if (previousContent) {
-        // Push to history
+        // Push to history, but limit to last 5 entries to save space
+        const docSnap = await getDoc(ref);
+        let currentHistory = (docSnap.data() as ChatMessage)?.editHistory || [];
+
+        // Add new entry
+        currentHistory.push({ content: previousContent, timestamp: Date.now() });
+
+        // Prune if > 5
+        if (currentHistory.length > 5) {
+            currentHistory = currentHistory.slice(currentHistory.length - 5);
+        }
+
         await updateDoc(ref, {
             ...updates,
-            editHistory: arrayUnion({ content: previousContent, timestamp: Date.now() })
+            editHistory: currentHistory
         });
     } else {
         await updateDoc(ref, updates);
     }
 }
+
 
 export function subscribeToChatMessages(projectId: string, callback: (messages: ChatMessage[]) => void): Unsubscribe {
     const q = query(
@@ -535,11 +566,33 @@ export async function deleteChatMessage(projectId: string, messageId: string, us
         await updateDoc(ref, {
             deletedFor: arrayUnion(userId)
         });
+
+        // 🧹 Cleanup Check: If all members have deleted it, delete globally
+        const docSnap = await getDoc(ref);
+        const msg = docSnap.data() as ChatMessage;
+        const projectRef = doc(db, 'projects', projectId);
+        const projectSnap = await getDoc(projectRef);
+
+        if (msg && msg.deletedFor && projectSnap.exists()) {
+            const projectData = projectSnap.data() as CloudProject;
+            // Get all unique member IDs (owners + members)
+            const allMemberIds = new Set([projectData.ownerId, ...Object.keys(projectData.members || {})]);
+
+            // Check if every member has deleted this message
+            const allDeleted = Array.from(allMemberIds).every(mid => msg.deletedFor!.includes(mid));
+
+            if (allDeleted) {
+
+                await deleteDoc(ref);
+            }
+        }
+
     } else {
         // Global delete (Unsend)
         await deleteDoc(ref);
     }
 }
+
 
 export async function clearChatHistory(projectId: string): Promise<void> {
     const q = query(collection(db, 'projects', projectId, 'chat'));
@@ -843,23 +896,101 @@ export async function respondToNotification(
 
 // ─── Document Snapshots (Version History) ───
 
+// ─── Document Snapshots (Version History - Optimized) ───
+
 export async function saveDocumentSnapshot(projectId: string, snapshot: DocumentSnapshot): Promise<void> {
-    await setDoc(doc(db, 'projects', projectId, 'documentSnapshots', snapshot.id), snapshot);
+    // 1. Try to find the latest full snapshot for this transcript to use as base
+    const q = query(
+        collection(db, 'projects', projectId, 'documentSnapshots'),
+        where('transcriptId', '==', snapshot.transcriptId),
+        where('isFullSnapshot', '==', true),
+        orderBy('timestamp', 'desc'),
+        limit(1)
+    );
+
+    let baseSnapshot: DocumentSnapshot | null = null;
+    try {
+        const snap = await getDocs(q);
+        if (!snap.empty) {
+            baseSnapshot = snap.docs[0].data() as DocumentSnapshot;
+        }
+    } catch (e) {
+        console.warn('Failed to fetch base snapshot, defaulting to full save', e);
+    }
+
+    // 2. Decide if we can use diff storage
+    let useDiff = false;
+    let patchText = '';
+
+    if (baseSnapshot && baseSnapshot.content && snapshot.content) {
+        // Compute diff
+        patchText = createTextPatch(baseSnapshot.content, snapshot.content);
+        // Heuristic: If diff is significantly smaller than full content (< 80%), use it.
+        // Also if base is very old, we might force a full save, but size heuristic usually handles drift.
+        if (patchText.length < snapshot.content.length * 0.8) {
+            useDiff = true;
+        }
+    }
+
+    const docRef = doc(db, 'projects', projectId, 'documentSnapshots', snapshot.id);
+
+    if (useDiff && baseSnapshot) {
+        // Save as Diff
+        const diffSnapshot: DocumentSnapshot = {
+            ...snapshot,
+            isFullSnapshot: false,
+            baseSnapshotId: baseSnapshot.id,
+            diff: patchText,
+            content: undefined // Clear content to save space
+        };
+        await setDoc(docRef, diffSnapshot);
+    } else {
+        // Save as Full Snapshot (new base)
+        const fullSnapshot: DocumentSnapshot = {
+            ...snapshot,
+            isFullSnapshot: true
+            // content is preserved
+        };
+        await setDoc(docRef, fullSnapshot);
+    }
 }
 
+
 export async function getDocumentSnapshots(projectId: string, transcriptId: string): Promise<DocumentSnapshot[]> {
-    // Note: To avoid requiring a composite index (transcriptId + timestamp),
-    // we query by equality first, then sort in memory. 
-    // Snapshots per transcript are usually few enough (<100) for this to be efficient.
+    // Fetch all snapshots for this transcript to ensure we can resolve diff bases
+    // (In future we can paginate and fetch bases on demand)
     const q = query(
         collection(db, 'projects', projectId, 'documentSnapshots'),
         where('transcriptId', '==', transcriptId)
     );
     const snap = await getDocs(q);
     const docs = snap.docs.map(d => d.data() as DocumentSnapshot);
+
     // Sort descending by timestamp
-    return docs.sort((a, b) => b.timestamp - a.timestamp).slice(0, 50);
+    docs.sort((a, b) => b.timestamp - a.timestamp);
+
+    // Create lookup map for base snapshots
+    const snapshotMap = new Map<string, DocumentSnapshot>();
+    docs.forEach(d => snapshotMap.set(d.id, d));
+
+    // Reconstruct content for snapshots in the requested view (top 50)
+    const resultDocs = docs.slice(0, 50);
+
+    resultDocs.forEach(d => {
+        if (!d.isFullSnapshot && d.baseSnapshotId && d.diff) {
+            const base = snapshotMap.get(d.baseSnapshotId);
+            if (base && base.content) {
+                d.content = applyTextPatch(base.content, d.diff);
+            } else {
+                d.content = "(Error: Base snapshot missing or corrupted)";
+            }
+        }
+        // If it's a full snapshot, d.content is already present
+    });
+
+    return resultDocs;
 }
+
 
 export async function getAllDocumentSnapshots(projectId: string): Promise<DocumentSnapshot[]> {
     const q = query(

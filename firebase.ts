@@ -24,7 +24,7 @@ try {
             tabManager: persistentMultipleTabManager()
         })
     });
-    console.log('[Firebase] Firestore initialized with persistentLocalCache');
+
 } catch (e) {
     // Already initialized (e.g., HMR in dev mode) — reuse existing instance
     console.log('[Firebase] Firestore already initialized, reusing existing instance', e);

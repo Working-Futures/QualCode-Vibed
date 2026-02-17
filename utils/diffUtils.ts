@@ -1,4 +1,8 @@
 
+import DiffMatchPatch from 'diff-match-patch';
+
+const dmp = new DiffMatchPatch();
+
 export type DiffType = 'equal' | 'insert' | 'delete';
 
 export interface DiffChunk {
@@ -116,3 +120,25 @@ export function mergeDiff(diffs: DiffChunk[], acceptedIndices: Set<number>): str
 
     return resultLines.join('\n');
 }
+
+// ─── diff-match-patch Utilities ───
+
+/**
+ * Creates a patch string representing the difference between original and modified text.
+ * Uses diff-match-patch for efficient text-based keying.
+ */
+export function createTextPatch(original: string, modified: string): string {
+    const patches = dmp.patch_make(original, modified);
+    return dmp.patch_toText(patches);
+}
+
+/**
+ * Applies a patch string to the original text to reproduce the modified text.
+ * @returns The modified text.
+ */
+export function applyTextPatch(original: string, patchText: string): string {
+    const patches = dmp.patch_fromText(patchText);
+    const [result] = dmp.patch_apply(patches, original);
+    return result;
+}
+

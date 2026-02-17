@@ -296,7 +296,10 @@ export interface DocumentSnapshot {
   projectId: string;
   transcriptId: string;
   transcriptName: string;
-  content: string;
+  content?: string; // Optional if storing diff
+  diff?: string;    // Patch text
+  isFullSnapshot?: boolean; // explicit flag
+  baseSnapshotId?: string; // ID of the snapshot this diff applies to
   savedBy: string;
   savedByName: string;
   timestamp: number;

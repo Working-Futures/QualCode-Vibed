@@ -46,7 +46,7 @@ export const processQueue = async (): Promise<boolean> => {
 
     if (!navigator.onLine) return false;
 
-    console.log(`Processing ${queue.length} offline items...`);
+
 
     // We process sequentially to ensure order correctness
     const failedItems: QueueItem[] = [];

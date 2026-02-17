@@ -11,7 +11,7 @@ import { MemosView } from './components/MemosView';
 import { TranscriptNoteLayer, TranscriptNoteLayerHandle } from './components/TranscriptNoteLayer';
 import { CollaborationPanel } from './components/CollaborationPanel';
 import { VersionControlPanel } from './components/VersionControlPanel';
-// import { TranscriptEditorModal } from './components/TranscriptEditorModal';
+
 import { useAuth } from './contexts/AuthContext';
 import {
   getCloudProject,
@@ -208,8 +208,7 @@ export default function App() {
   const userRef = useRef<typeof user>(null);
   const lastSavedTime = useRef<number>(Date.now());
 
-  // Debounce ref (unused now but kept if needed for other things, or removing)
-  const cloudSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
 
   // Search States
   const [globalSearchQuery, setGlobalSearchQuery] = useState('');
@@ -225,9 +224,9 @@ export default function App() {
   // 1. Sticky Notes Subscription
   useEffect(() => {
     if (!cloudProject?.id) return;
-    console.log('[App] Setting up sticky notes subscription for project', cloudProject.id);
+
     const unsub = subscribeToStickyNotes(cloudProject.id, (serverNotes) => {
-      console.log('[App] Received', serverNotes.length, 'notes from Firestore subscription');
+
       setStickyNotes(serverNotes);
     });
     return () => unsub();
@@ -291,7 +290,7 @@ export default function App() {
     if (!project) return;
     const saveInterval = setInterval(() => {
       localStorage.setItem('autosave_project', JSON.stringify(project));
-      console.log('Autosaved project to browser storage');
+
     }, 30000);
     return () => clearInterval(saveInterval);
   }, [project]);
@@ -402,20 +401,20 @@ export default function App() {
   ) => {
     if (!currentCloudProject || !currentUser || viewingAsUser) return;
 
-    console.log('[saveToCloud] Starting cloud save...');
+
     setCloudSyncStatus('saving');
     try {
       // Force sticky notes to save pending changes
       if (stickyBoardRef.current) {
-        console.log('[saveToCloud] Saving sticky notes...');
+
         await stickyBoardRef.current.saveAll();
-        console.log('[saveToCloud] Sticky notes saved OK');
+
       }
 
       // Save codes (shared codebook)
-      console.log('[saveToCloud] Saving codes...');
+
       await saveCodes(currentCloudProject.id, currentProject.codes);
-      console.log('[saveToCloud] Codes saved OK');
+
 
       // Save user-specific data (selections + memos + personal codes)
       const transcriptMemos: Record<string, string> = {};
@@ -429,14 +428,14 @@ export default function App() {
         c.createdBy === currentUser?.uid
       );
 
-      console.log('[saveToCloud] Saving user project data...');
+
       await saveUserProjectData(currentCloudProject.id, currentUser.uid, {
         selections: currentProject.selections,
         transcriptMemos,
         personalMemo: currentProject.projectMemo || '',
         personalCodes,
       });
-      console.log('[saveToCloud] User project data saved OK');
+
 
       // Update project metadata
       const updates = {
@@ -445,9 +444,9 @@ export default function App() {
       };
 
       try {
-        console.log('[saveToCloud] Updating cloud project metadata...');
+
         await updateCloudProject(currentCloudProject.id, updates);
-        console.log('[saveToCloud] Cloud project metadata updated OK');
+
       } catch (err) {
         console.warn("[saveToCloud] Failed immediate update, queueing...", err);
         addToQueue({ type: 'update_project', projectId: currentCloudProject.id, updates });
@@ -455,7 +454,7 @@ export default function App() {
 
       lastSavedTime.current = currentProject.lastModified;
       setCloudSyncStatus('saved');
-      console.log('[saveToCloud] Cloud save complete!');
+
       setTimeout(() => setCloudSyncStatus('idle'), 2000);
     } catch (err) {
       console.warn('[saveToCloud] Cloud save error - adding to offline queue:', err);
@@ -487,7 +486,7 @@ export default function App() {
     processQueue();
 
     const handleOnline = () => {
-      console.log("Back online, processing queue...");
+
       processQueue().then((success) => {
         if (success) setCloudSyncStatus('saved');
         else setCloudSyncStatus('error');
@@ -545,17 +544,17 @@ export default function App() {
   // ─── Open Cloud Project ───
   const openCloudProject = async (cp: CloudProject) => {
     if (!user) return;
-    console.log(`[openCloudProject] ▶ Opening cloud project "${cp.name}" (${cp.id})...`);
+
 
     try {
       // Load all cloud data
-      console.log('[openCloudProject] Step 1: Fetching transcripts, codes, and user data in parallel...');
+
       const [transcripts, sharedCodes, userData] = await Promise.all([
         getTranscripts(cp.id),
         getCodes(cp.id),
         getUserProjectData(cp.id, user.uid),
       ]);
-      console.log(`[openCloudProject] Step 1 ✓: ${transcripts.length} transcripts, ${sharedCodes.length} shared codes, ${userData.selections.length} selections`);
+
 
       // Merge shared codes with user's personal codes (and drafts)
       const userCodes = (userData.personalCodes || []).filter(c => c.type === 'personal' || c.type === 'suggested');
@@ -563,10 +562,10 @@ export default function App() {
       const sharedIds = new Set(sharedCodes.map(c => c.id));
       const uniqueUserCodes = userCodes.filter(c => !sharedIds.has(c.id));
       const codes = [...sharedCodes, ...uniqueUserCodes];
-      console.log(`[openCloudProject] Merged codes: ${sharedCodes.length} shared + ${uniqueUserCodes.length} personal/drafts = ${codes.length} total`);
+
 
       // Convert cloud transcripts to local format
-      console.log('[openCloudProject] Step 2: Restoring highlights on transcripts...');
+
       const localTranscripts: Transcript[] = transcripts.map(t => ({
         id: t.id,
         name: t.name,
@@ -575,7 +574,7 @@ export default function App() {
         dateAdded: t.dateAdded,
         memo: userData.transcriptMemos[t.id] || '',
       }));
-      console.log(`[openCloudProject] Step 2 ✓: Highlights restored for ${localTranscripts.length} transcripts`);
+
 
       // Construct a local Project from cloud data
       const localProject: Project = {
@@ -595,7 +594,7 @@ export default function App() {
       setProject(localProject);
       setActiveTranscriptId(localTranscripts.length > 0 ? localTranscripts[0].id : null);
       setIsEditing(false);
-      console.log(`[openCloudProject] ✅ Cloud project "${cp.name}" opened successfully`);
+
     } catch (err) {
       console.error('[openCloudProject] ❌ Error opening cloud project:', err);
       showAlert("Error", "Error opening cloud project. Please try again.");
@@ -901,10 +900,10 @@ export default function App() {
     // Step 0: Auto-save current user's data before switching to view mode
     // This prevents data loss (memos, selections) when the project state is replaced
     if (user && !viewingAsUser) {
-      console.log('[viewCollaborator] Step 0: Auto-saving current user data before view switch...');
+
       try {
         await saveToCloud(project, cloudProject, user);
-        console.log('[viewCollaborator] Step 0 ✓: Current user data saved');
+
       } catch (saveErr) {
         console.warn('[viewCollaborator] Step 0: Auto-save failed, proceeding anyway:', saveErr);
       }
@@ -912,13 +911,13 @@ export default function App() {
 
     setViewingAsUser({ id: userId, name: userName });
     setIsEditing(false);
-    console.log('[viewCollaborator] Set viewingAsUser and disabled editing');
+
 
     try {
       // Step 1: Fetch the collaborator's user data (selections, memos, personal codes)
-      console.log(`[viewCollaborator] Step 1: Fetching user project data for ${userId}...`);
+
       const data = await getUserProjectData(cloudProject.id, userId);
-      console.log(`[viewCollaborator] Step 1 ✓: Got ${data.selections.length} selections, ${Object.keys(data.transcriptMemos).length} transcript memos, personalMemo=${!!data.personalMemo}`);
+
 
       // Step 2: Prepare the codes for the view (Shared Codes + Collaborator's Personal Codes)
       // We filter out the *current* user's personal codes from the project
@@ -926,10 +925,10 @@ export default function App() {
       const sharedCodes = project.codes.filter(c => c.type === 'master' || c.type === 'suggested');
       const collaboratorPersonalCodes = (data.personalCodes || []).filter(c => c.type === 'personal');
       const viewCodes = [...sharedCodes, ...collaboratorPersonalCodes];
-      console.log(`[viewCollaborator] Step 2: Merged codes (Shared: ${sharedCodes.length} + Collab Personal: ${collaboratorPersonalCodes.length})`);
+
 
       // Step 3: Hydrate transcripts with collaborator's selections using their codes
-      console.log('[viewCollaborator] Step 3: Restoring highlights on transcripts...');
+
       const updatedTranscripts = project.transcripts.map(t => {
         // We use stripHighlights first to ensure clean slate if needed, though t.content might have current user's highlights?
         // Actually t.content in project state has highlights. We must strip them first or use clean content?
@@ -944,7 +943,7 @@ export default function App() {
       });
 
       // Step 4: Update the project state with the collaborator's view
-      console.log('[viewCollaborator] Step 4: Updating project state with collaborator view...');
+
       setProject({
         ...project,
         codes: viewCodes, // Update codes to show collaborator's personal codes in CodeTree
@@ -952,7 +951,7 @@ export default function App() {
         transcripts: updatedTranscripts,
         projectMemo: data.personalMemo || ''
       });
-      console.log(`[viewCollaborator] ✅ Successfully loaded view for ${userName}`);
+
 
     } catch (e) {
       console.error('[viewCollaborator] ❌ Error loading collaborator data:', e);
@@ -962,7 +961,7 @@ export default function App() {
   };
 
   const handleExitViewMode = async () => {
-    console.log('[exitViewMode] ▶ Exiting view mode...');
+
     if (!cloudProject || !user || !project) {
       console.warn('[exitViewMode] Missing cloudProject, user, or project. Clearing viewingAsUser.');
       setViewingAsUser(null);
@@ -970,15 +969,15 @@ export default function App() {
     }
 
     setViewingAsUser(null);
-    console.log('[exitViewMode] Cleared viewingAsUser, restoring own data...');
+
 
     try {
       // Step 1: Fetch the current user's data
-      console.log(`[exitViewMode] Step 1: Fetching own user project data (${user.uid})...`);
+
       const data = await getUserProjectData(cloudProject.id, user.uid);
 
       // Step 2: Restore original codes (Shared + My Personal)
-      console.log(`[exitViewMode] Step 2: Restoring my codes...`);
+
       // We assume project.codes currently has (Shared + Collab Personal).
       // We need to rebuild (Shared + My Personal).
       const sharedCodes = project.codes.filter(c => c.type === 'master' || c.type === 'suggested');
@@ -987,7 +986,7 @@ export default function App() {
       const restoredCodes = [...sharedCodes, ...myPersonalCodes];
 
       // Step 3: Hydrate transcripts with own selections
-      console.log(`[exitViewMode] Step 3: Restoring highlights...`);
+
       const restoredTranscripts = project.transcripts.map(t => {
         const cleanContent = stripHighlights(t.content);
         return {
@@ -1005,7 +1004,7 @@ export default function App() {
         transcripts: restoredTranscripts,
         projectMemo: data.personalMemo || ''
       });
-      console.log('[exitViewMode] ✅ Successfully exited view mode');
+
 
     } catch (e) {
       console.error('[exitViewMode] ❌ Error restoring user data:', e);
@@ -1014,7 +1013,7 @@ export default function App() {
   };
 
   const handleSaveProject = async () => {
-    console.log('[handleSaveProject] ▶ Manual save triggered');
+
     if (!project) {
       console.warn('[handleSaveProject] No project loaded, aborting');
       return;
@@ -1028,14 +1027,14 @@ export default function App() {
 
     // If cloud, also do an immediate cloud save
     if (cloudProject && user) {
-      console.log('[handleSaveProject] Cloud project: initiating cloud save...');
+
       await saveToCloud(project, cloudProject, user);
-      console.log('[handleSaveProject] ✅ Cloud save complete');
+
     } else {
-      console.log('[handleSaveProject] Local project: exporting file...');
+
       // Only export local file if NOT a cloud project
       saveProjectFile(project);
-      console.log('[handleSaveProject] ✅ File export complete');
+
     }
   };
 
@@ -1321,7 +1320,7 @@ export default function App() {
               // Restore transcript content locally
               handleProjectUpdate({
                 ...project,
-                transcripts: project.transcripts.map(t => t.id === snapshot.transcriptId ? { ...t, content: snapshot.content } : t)
+                transcripts: project.transcripts.map(t => t.id === snapshot.transcriptId ? { ...t, content: snapshot.content || '' } : t)
               });
               setActiveTranscriptId(snapshot.transcriptId);
               setActiveView('editor');
