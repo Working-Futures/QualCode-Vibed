@@ -12,6 +12,15 @@ const firebaseConfig = {
     measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
 };
 
+// --- DEBUG: Verify Config ---
+console.log('[Firebase Config Check]', Object.fromEntries(
+    Object.entries(firebaseConfig).map(([k, v]) => [k, v ? (v.length > 5 ? v.substring(0, 5) + '...' : '***') : 'MISSING'])
+));
+
+if (!firebaseConfig.apiKey) {
+    throw new Error('Firebase API Key is missing! Check your environment variables.');
+}
+
 const app = initializeApp(firebaseConfig);
 
 export const auth = getAuth(app);
