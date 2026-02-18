@@ -3,13 +3,13 @@ import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore';
 
 const firebaseConfig = {
-    apiKey: "AIzaSyCoIHisDvkpxyA1KMjNXoNHMZHiIBuWwKs",
-    authDomain: "qualcode-vibed.firebaseapp.com",
-    projectId: "qualcode-vibed",
-    storageBucket: "qualcode-vibed.firebasestorage.app",
-    messagingSenderId: "806254512680",
-    appId: "1:806254512680:web:81857af733c65bad83031d",
-    measurementId: "G-4MQMST1Q4E"
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+    appId: import.meta.env.VITE_FIREBASE_APP_ID,
+    measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID
 };
 
 const app = initializeApp(firebaseConfig);

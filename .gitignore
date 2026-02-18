@@ -73,6 +73,8 @@ typings/
 .env
 .env.test
 .env.local
+.env.*
+!.env.example
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
@@ -132,11 +134,6 @@ Thumbs.db
 firebase-debug.log
 firestore-debug.log
 
-# Environment files (in case you add them later)
-.env.production
-.env.development
-.env.staging
-
 # Gemini agent artifacts (not project code)
 .gemini/
 
@@ -144,4 +141,3 @@ firestore-debug.log
 *~
 *.bak
 *.tmp
-
