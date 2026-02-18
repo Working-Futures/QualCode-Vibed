@@ -2,27 +2,37 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { getFirestore, initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from 'firebase/firestore';
 
-// SECURITY WARNING: Hardcoded fallback keys for debugging deployment.
-// These allow the app to work if GitHub Secrets fail.
-// For strict open source security, ensure GitHub Actions Secrets are working and remove these fallbacks.
-const firebaseConfig = {
-    apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyC00StWLQnOvG3iJfXzHsOjeFhpOZ0U2G0",
-    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "qualcode-vibed.firebaseapp.com",
-    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "qualcode-vibed",
-    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "qualcode-vibed.firebasestorage.app",
-    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "806254512680",
-    appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:806254512680:web:81857af733c65bad83031d",
-    measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-4MQMST1Q4E"
-};
+// Firebase config is loaded entirely from environment variables.
+// See .env.example for the required variables.
+// For local development: copy .env.example to .env and fill in your values.
+// For deployment: set these as GitHub Actions Secrets.
+const requiredEnvVars = [
+    'VITE_FIREBASE_API_KEY',
+    'VITE_FIREBASE_AUTH_DOMAIN',
+    'VITE_FIREBASE_PROJECT_ID',
+    'VITE_FIREBASE_STORAGE_BUCKET',
+    'VITE_FIREBASE_MESSAGING_SENDER_ID',
+    'VITE_FIREBASE_APP_ID',
+] as const;
 
-// --- DEBUG: Verify Config ---
-console.log('[Firebase Config Check]', Object.fromEntries(
-    Object.entries(firebaseConfig).map(([k, v]) => [k, v ? (v.length > 5 ? v.substring(0, 5) + '...' : '***') : 'MISSING'])
-));
-
-if (!firebaseConfig.apiKey || firebaseConfig.apiKey === 'MISSING') {
-    throw new Error('Firebase API Key is missing! Check your environment variables.');
+const missingVars = requiredEnvVars.filter(key => !import.meta.env[key]);
+if (missingVars.length > 0) {
+    throw new Error(
+        `Missing required Firebase environment variables: ${missingVars.join(', ')}.\n` +
+        'Copy .env.example to .env and fill in your Firebase project values.\n' +
+        'See README.md for setup instructions.'
+    );
 }
+
+const firebaseConfig = {
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+    storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+    messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+    appId: import.meta.env.VITE_FIREBASE_APP_ID,
+    measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID ?? '',
+};
 
 const app = initializeApp(firebaseConfig);
 
