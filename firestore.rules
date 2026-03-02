@@ -17,7 +17,10 @@ service cloud.firestore {
         request.auth.token.email.lower() in resource.data.memberEmails;
 
       // Members can update
-      allow update: if request.auth != null && (
+      allow update: if request.auth != null && 
+        // Prevent changing owner
+        request.resource.data.ownerId == resource.data.ownerId &&
+        (
         // Case 1: Already a member
         request.auth.token.email.lower() in resource.data.memberEmails ||
         // Case 2: Joining via Invitation
@@ -72,11 +75,15 @@ service cloud.firestore {
           get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
       }
 
-      // ─── Direct Messages: Members can read/write ───
+      // ─── Direct Messages: Participants can read/write ───
       match /directMessages/{messageId} {
-        allow read, write: if request.auth != null &&
-          request.auth.token.email.lower() in
-          get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
+        allow read, update, delete: if request.auth != null && (
+          request.auth.uid == resource.data.fromId || 
+          request.auth.uid == resource.data.toId
+        );
+        allow create: if request.auth != null &&
+          request.auth.uid == request.resource.data.fromId &&
+          request.auth.token.email.lower() in get(/databases/$(database)/documents/projects/$(projectId)).data.memberEmails;
       }
 
       // ─── Code History: Members can read/write ───
@@ -124,8 +131,9 @@ service cloud.firestore {
 
     // ─── Invitations ───
     match /invitations/{invitationId} {
-      // Any authenticated user can create an invitation
-      allow create: if request.auth != null;
+      // Any authenticated user can create an invitation if they are a member of the project
+      allow create: if request.auth != null &&
+        request.auth.token.email.lower() in get(/databases/$(database)/documents/projects/$(request.resource.data.projectId)).data.memberEmails;
 
       // Invited user can read their invitations
       allow read: if request.auth != null &&
